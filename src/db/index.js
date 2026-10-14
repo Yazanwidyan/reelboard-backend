@@ -106,7 +106,16 @@ const syncCatalog = () => {
   return catalog;
 };
 
-export let catalogMeta = { dimensions: [], themes: {}, clipSeconds: 30 };
+// schema.sql only creates what's missing, so a column added to an existing
+// table after a database was created is added here.
+const migrate = () => {
+  const userColumns = new Set(all("PRAGMA table_info(users)").map((column) => column.name));
+  if (!userColumns.has("has_password")) {
+    db.exec("ALTER TABLE users ADD COLUMN has_password INTEGER NOT NULL DEFAULT 1");
+  }
+};
+
+export let catalogMeta ={ dimensions: [], themes: {}, clipSeconds: 30 };
 
 export const openDatabase = (filename = config.databasePath) => {
   if (db) return db;
@@ -115,6 +124,7 @@ export const openDatabase = (filename = config.databasePath) => {
   db.exec("PRAGMA foreign_keys = ON");
   if (filename !== ":memory:") db.exec("PRAGMA journal_mode = WAL");
   db.exec(fs.readFileSync(path.join(here, "schema.sql"), "utf8"));
+  migrate();
   const catalog = syncCatalog();
   catalogMeta = {
     dimensions: catalog.dimensions,

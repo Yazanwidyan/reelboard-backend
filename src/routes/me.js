@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
 import { fromJSON, get, run, toJSON, transaction } from "../db/index.js";
-import { conflict, unauthorized } from "../lib/errors.js";
+import { badRequest, conflict, unauthorized } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { getFullState, getUserState, toSettings } from "../lib/library.js";
 import { getMovieById } from "../lib/movies.js";
@@ -175,13 +175,24 @@ router.delete("/searches", (req, res) => {
 
 // ---- Account -------------------------------------------------------------
 
-// Deletes the account and everything in it. Requires the password again.
-router.delete("/", validate(z.object({ password: z.string().min(1) })), async (req, res) => {
-  const { password_hash: hash } = getUserRow(req.userId);
-  if (!(await bcrypt.compare(req.body.password, hash))) throw unauthorized("Wrong password");
-  run("DELETE FROM users WHERE id = ?", [req.userId]);
-  res.status(204).end();
-});
+// Deletes the account and everything in it. Asks for the password again —
+// or, for an account made with Google / Apple (no password), the word DELETE.
+router.delete(
+  "/",
+  validate(z.object({ password: z.string().min(1).optional(), confirm: z.string().optional() })),
+  async (req, res) => {
+    const { password_hash: hash, has_password: hasPassword } = getUserRow(req.userId);
+    if (hasPassword) {
+      if (!req.body.password || !(await bcrypt.compare(req.body.password, hash))) {
+        throw unauthorized("Wrong password");
+      }
+    } else if (req.body.confirm !== "DELETE") {
+      throw badRequest("Type DELETE to confirm");
+    }
+    run("DELETE FROM users WHERE id = ?", [req.userId]);
+    res.status(204).end();
+  },
+);
 
 // ---- Import from the app's local storage ---------------------------------
 //

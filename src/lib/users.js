@@ -25,6 +25,8 @@ export const toPublicUser = (row) => ({
 export const toProfile = (row) => ({
   id: row.id,
   email: row.email,
+  // False for accounts made with Google / Apple (they have no password).
+  hasPassword: row.has_password !== 0,
   displayName: row.display_name,
   handle: `@${row.handle}`,
   bio: row.bio,

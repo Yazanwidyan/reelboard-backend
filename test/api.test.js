@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { createApp } from "../src/app.js";
 import { closeDatabase, openDatabase } from "../src/db/index.js";
+import { verifiers } from "../src/lib/social.js";
 
 let server;
 let base;
@@ -83,6 +84,83 @@ describe("auth", () => {
     });
     assert.equal(a.body.user.handle, "@same.name");
     assert.equal(b.body.user.handle, "@same.name2");
+  });
+});
+
+describe("google and apple sign-in", () => {
+  // Real Google/Apple tokens can't be minted in a test; the verifiers are
+  // swapped for fakes that read the "token" as JSON claims.
+  const realVerifiers = { ...verifiers };
+  const fakeToken = (claims) => JSON.stringify(claims);
+  before(() => {
+    verifiers.google = async (token) => ({ name: null, ...JSON.parse(token) });
+    verifiers.apple = async (token) => ({ name: null, ...JSON.parse(token) });
+  });
+  after(() => Object.assign(verifiers, realVerifiers));
+
+  test("refuses when the server has no Google client id configured", async () => {
+    const r = await realVerifiers.google("x").catch((error) => error);
+    assert.equal(r.status, 503);
+  });
+
+  test("first sign-in creates an account; later ones find it", async () => {
+    const token = fakeToken({ subject: "g-1", email: "Gina@Example.com", emailVerified: true, name: "Gina G" });
+    const first = await api("POST", "/auth/google", { body: { idToken: token } });
+    assert.equal(first.status, 201);
+    assert.equal(first.body.isNew, true);
+    assert.equal(first.body.user.displayName, "Gina G");
+    assert.equal(first.body.user.email, "gina@example.com");
+    assert.equal(first.body.user.hasPassword, false);
+
+    const again = await api("POST", "/auth/google", { body: { idToken: token } });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.isNew, false);
+    assert.equal(again.body.user.id, first.body.user.id);
+
+    const me = await api("GET", "/me", { token: again.body.token });
+    assert.equal(me.status, 200);
+
+    // No password to log in with — the message says what to do instead.
+    const login = await api("POST", "/auth/login", { body: { email: "gina@example.com", password: "whatever1" } });
+    assert.equal(login.status, 401);
+    assert.match(login.body.error.message, /Google or Apple/);
+  });
+
+  test("a verified email links to the existing account; an unverified one doesn't", async () => {
+    const owner = await register("Email Owner", "emailowner");
+    const linked = await api("POST", "/auth/apple", {
+      body: { identityToken: fakeToken({ subject: "a-1", email: "emailowner@example.com", emailVerified: true }) },
+    });
+    assert.equal(linked.status, 200);
+    assert.equal(linked.body.user.id, owner.user.id);
+    assert.equal(linked.body.user.hasPassword, true);
+
+    const sneaky = await api("POST", "/auth/google", {
+      body: { idToken: fakeToken({ subject: "g-2", email: "emailowner@example.com", emailVerified: false }) },
+    });
+    assert.equal(sneaky.status, 409);
+  });
+
+  test("apple without an email still gets an account, named from the app", async () => {
+    const r = await api("POST", "/auth/apple", {
+      body: { identityToken: fakeToken({ subject: "a-2", email: null, emailVerified: false }), fullName: "Ali A" },
+    });
+    assert.equal(r.status, 201);
+    assert.equal(r.body.user.displayName, "Ali A");
+  });
+
+  test("deleting a google-only account asks for DELETE instead of a password", async () => {
+    const r = await api("POST", "/auth/google", {
+      body: { idToken: fakeToken({ subject: "g-3", email: "leaving@example.com", emailVerified: true }) },
+    });
+    const { token } = r.body;
+    assert.equal((await api("DELETE", "/me", { token, body: {} })).status, 400);
+    assert.equal((await api("DELETE", "/me", { token, body: { confirm: "DELETE" } })).status, 204);
+    // Signing in again starts a fresh account.
+    const back = await api("POST", "/auth/google", {
+      body: { idToken: fakeToken({ subject: "g-3", email: "leaving@example.com", emailVerified: true }) },
+    });
+    assert.equal(back.body.isNew, true);
   });
 });
 

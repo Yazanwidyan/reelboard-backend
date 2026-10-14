@@ -47,6 +47,19 @@ npm run enrich-omdb       # updates data/catalog.json; restart the server after
 | POST | `/api/auth/register` | `{ email, password (8+), displayName, handle? }` |
 | POST | `/api/auth/login` | `{ email, password }` |
 | POST | `/api/auth/refresh` | *(signed in)* returns a fresh token |
+| POST | `/api/auth/google` | `{ idToken }` from Google Sign-In. Returns `{ token, user, isNew }`. |
+| POST | `/api/auth/apple` | `{ identityToken, fullName? }` from Sign in with Apple. Returns `{ token, user, isNew }`. |
+
+**Google and Apple sign-in.** The server checks the token's signature against Google's or Apple's published keys, and checks that it was issued for this app.
+- **First sign-in:** links to the account with the same email, but only if the provider verified that email. Otherwise it creates a new account.
+- **After that:** the provider's user id finds the account.
+- **No password:** these accounts have `user.hasPassword = false`. Email/password login tells them to use the button instead, and deleting the account takes `{ confirm: "DELETE" }` in place of a password.
+
+Setup:
+- **Google:** in Google Cloud Console (APIs & Services → Credentials), create OAuth client ids: a **Web** one, plus **iOS** and **Android** ones for the app. The Android one needs the app's package name and signing-key SHA-1. Put the web client id in this server's `GOOGLE_CLIENT_IDS`. Put the web and iOS ids in the app's `.env.local`, as `EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID` and `EXPO_PUBLIC_GOOGLE_IOS_CLIENT_ID`. Then make a new build of the app.
+- **Apple (iPhone only):** needs an Apple Developer membership. `APPLE_CLIENT_IDS` defaults to the app's bundle id. Add `host.exp.Exponent` to test from Expo Go. The capability is set from the app's `app.json`, so make a new build of the app.
+
+Until these are set, the buttons explain what's missing, and the server answers `503`.
 
 ### Movies (public)
 | Method | Path | Notes |

@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS users (
   id                 TEXT PRIMARY KEY,
   email              TEXT NOT NULL UNIQUE COLLATE NOCASE,
   password_hash      TEXT NOT NULL,
+  -- 0 for accounts made with Google / Apple only (password_hash is then a
+  -- random hash nobody knows).
+  has_password       INTEGER NOT NULL DEFAULT 1,
   handle             TEXT NOT NULL UNIQUE COLLATE NOCASE,  -- without the "@"
   display_name       TEXT NOT NULL,
   bio                TEXT NOT NULL DEFAULT '',
@@ -44,6 +47,18 @@ CREATE TABLE IF NOT EXISTS users (
   pinned_collections TEXT NOT NULL DEFAULT '[]',   -- JSON collection ids
   created_at         INTEGER NOT NULL
 );
+
+-- Google / Apple sign-ins linked to an account. `subject` is the provider's
+-- stable user id (the token's "sub"), which never changes even if the email does.
+CREATE TABLE IF NOT EXISTS auth_identities (
+  provider   TEXT NOT NULL CHECK (provider IN ('google','apple')),
+  subject    TEXT NOT NULL,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  email      TEXT,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (provider, subject)
+);
+CREATE INDEX IF NOT EXISTS auth_identities_by_user ON auth_identities (user_id);
 
 -- One row per user: everything from the app's small single-value stores.
 CREATE TABLE IF NOT EXISTS user_state (
