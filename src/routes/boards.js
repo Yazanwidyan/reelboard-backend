@@ -87,7 +87,9 @@ router.patch("/:id", validate(idParam, "params"), validate(z.object({ name })), 
   res.json({ board: toBoard(get("SELECT * FROM boards WHERE id = ?", [req.params.id])) });
 });
 
+// Deleting a board that's already gone succeeds (a retried request).
 router.delete("/:id", validate(idParam, "params"), (req, res) => {
+  if (!get("SELECT 1 FROM boards WHERE id = ?", [req.params.id])) return res.status(204).end();
   loadBoard(req.params.id, req.userId, { write: true });
   run("DELETE FROM boards WHERE id = ?", [req.params.id]);
   res.status(204).end();
@@ -135,12 +137,12 @@ router.delete(
   validate(z.object({ id: z.string().min(1), movieId }), "params"),
   (req, res) => {
     loadBoard(req.params.id, req.userId, { write: true });
+    // Already off the board (a retried request) is fine too.
     const { changes } = run("DELETE FROM board_movies WHERE board_id = ? AND movie_id = ?", [
       req.params.id,
       req.params.movieId,
     ]);
-    if (!changes) throw notFound("That movie isn't on this board");
-    touch(req.params.id);
+    if (changes) touch(req.params.id);
     res.json({ board: toBoard(get("SELECT * FROM boards WHERE id = ?", [req.params.id])) });
   },
 );

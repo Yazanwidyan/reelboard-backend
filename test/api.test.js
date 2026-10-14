@@ -19,17 +19,18 @@ after(() => {
   closeDatabase();
 });
 
-const api = async (method, path, { token, body } = {}) => {
+const api = async (method, path, { token, body, headers } = {}) => {
   const response = await fetch(base + path, {
     method,
     headers: {
       ...(body !== undefined ? { "content-type": "application/json" } : {}),
       ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...headers,
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const text = await response.text();
-  return { status: response.status, body: text ? JSON.parse(text) : null };
+  return { status: response.status, body: text ? JSON.parse(text) : null, headers: response.headers };
 };
 
 const register = async (name, handle) => {
@@ -210,6 +211,15 @@ describe("movies", () => {
     assert.deepEqual(Object.keys(catalog.body.reelClips[0]).sort(), ["end", "movieId", "start", "youtubeId"]);
     assert.equal(catalog.body.dimensions.length, 6);
     assert.ok(catalog.body.themes.twist);
+
+    // The app's saved copy is still current: an empty 304.
+    const etag = catalog.headers.get("etag");
+    assert.ok(etag);
+    const unchanged = await api("GET", "/movies/catalog", { headers: { "if-none-match": etag } });
+    assert.equal(unchanged.status, 304);
+    assert.equal(unchanged.body, null);
+    const stale = await api("GET", "/movies/catalog", { headers: { "if-none-match": '"old"' } });
+    assert.equal(stale.status, 200);
   });
 });
 
@@ -247,6 +257,14 @@ describe("library", () => {
     assert.equal(state.body.library.pickedMovie, null);
     assert.equal(state.body.challenges.activeChallenge, null);
     assert.equal(state.body.challenges.history.length, 1);
+
+    const library = await api("GET", "/me/library", { token });
+    assert.deepEqual(library.body, state.body.library);
+
+    // Nothing active any more: skipping is a harmless no-op.
+    const skipped = await api("POST", "/me/challenges/active/skip", { token });
+    assert.equal(skipped.status, 200);
+    assert.equal(skipped.body.history.length, 1);
   });
 
   test("tier, date, rewatch and unwatch", async () => {
@@ -264,7 +282,36 @@ describe("library", () => {
     assert.equal(rewatch.body.entry.watchCount, 2);
 
     assert.equal((await api("DELETE", "/me/watched/m7", { token })).status, 204);
-    assert.equal((await api("DELETE", "/me/watched/m7", { token })).status, 404);
+    // Removing it again (a retry) still succeeds.
+    assert.equal((await api("DELETE", "/me/watched/m7", { token })).status, 204);
+    assert.equal((await api("DELETE", "/me/watchlist/m7", { token })).status, 204);
+  });
+
+  test("a change re-sent with the same Idempotency-Key is applied once", async () => {
+    await api("POST", "/me/watched", { token, body: { movieId: "m11" } });
+    const headers = { "idempotency-key": "rewatch-m11-0001" };
+    const first = await api("POST", "/me/watched/m11/rewatch", { token, headers });
+    assert.equal(first.body.entry.watchCount, 2);
+    const replay = await api("POST", "/me/watched/m11/rewatch", { token, headers });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.headers.get("idempotent-replayed"), "true");
+    assert.deepEqual(replay.body, first.body);
+    const entry = (await api("GET", "/me/watched", { token })).body.watched.find((e) => e.movieId === "m11");
+    assert.equal(entry.watchCount, 2, "the replay didn't count a third watch");
+
+    // A 204 is replayed too, and a key can't be reused for another request.
+    const deleteHeaders = { "idempotency-key": "unwatch-m11-0001" };
+    assert.equal((await api("DELETE", "/me/watched/m11", { token, headers: deleteHeaders })).status, 204);
+    assert.equal((await api("DELETE", "/me/watched/m11", { token, headers: deleteHeaders })).status, 204);
+    assert.equal((await api("POST", "/me/watched/m11/rewatch", { token, headers: deleteHeaders })).status, 409);
+    assert.equal((await api("DELETE", "/me/watched/m11", { token, headers: { "idempotency-key": "x" } })).status, 400);
+
+    // Keys are per account.
+    const other = await register("Other Idem", "otheridem");
+    await api("POST", "/me/watched", { token: other.token, body: { movieId: "m11" } });
+    const theirs = await api("POST", "/me/watched/m11/rewatch", { token: other.token, headers });
+    assert.equal(theirs.body.entry.watchCount, 2);
+    assert.equal(theirs.headers.get("idempotent-replayed"), null);
   });
 
   test("recommendations skip watched movies and honour the count", async () => {
@@ -342,6 +389,8 @@ describe("boards", () => {
 
     r = await api("DELETE", `/boards/${id}/movies/m1`, { token });
     assert.deepEqual(r.body.board.movieIds, ["m2", "m3"]);
+    r = await api("DELETE", `/boards/${id}/movies/m1`, { token });
+    assert.equal(r.status, 200, "already off the board");
 
     // The app's own board id is kept; creating it twice (a retry) is harmless.
     r = await api("POST", "/boards", { token, body: { id: "bm1x2y3z", name: "Mine" } });
@@ -357,6 +406,7 @@ describe("boards", () => {
     assert.equal((await api("GET", "/boards", { token })).body.boards.length, 1);
     assert.equal((await api("DELETE", `/boards/${id}`, { token })).status, 204);
     assert.equal((await api("GET", `/boards/${id}`, { token })).status, 404);
+    assert.equal((await api("DELETE", `/boards/${id}`, { token })).status, 204, "already gone");
   });
 });
 

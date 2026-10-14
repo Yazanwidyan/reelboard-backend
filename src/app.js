@@ -5,6 +5,7 @@ import helmet from "helmet";
 import config from "./config.js";
 import { requireAuth } from "./middleware/auth.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
+import { idempotency } from "./middleware/idempotency.js";
 import activityRoutes from "./routes/activity.js";
 import authRoutes from "./routes/auth.js";
 import boardRoutes from "./routes/boards.js";
@@ -26,6 +27,8 @@ export const createApp = () => {
   app.use(
     cors({
       origin: config.corsOrigin === "*" ? "*" : config.corsOrigin.split(",").map((o) => o.trim()),
+      allowedHeaders: ["Authorization", "Content-Type", "Idempotency-Key", "If-None-Match"],
+      exposedHeaders: ["ETag", "Idempotent-Replayed"],
     }),
   );
   // The import endpoint carries a whole local library, so allow a roomy body.
@@ -37,15 +40,16 @@ export const createApp = () => {
   app.use("/api/auth", authRoutes);
   app.use("/api/movies", movieRoutes);
 
-  // Signed in
-  app.use("/api/me/challenges", requireAuth, challengeRoutes);
-  app.use("/api/me/taste", requireAuth, tasteRoutes);
-  app.use("/api/me", requireAuth, libraryRoutes);
-  app.use("/api/me", requireAuth, meRoutes);
-  app.use("/api/boards", requireAuth, boardRoutes);
-  app.use("/api/users", requireAuth, usersRouter);
-  app.use("/api/friends", requireAuth, friendsRouter);
-  app.use("/api/activity", requireAuth, activityRoutes);
+  // Signed in. Changes may carry an Idempotency-Key (see middleware/idempotency.js).
+  const signedIn = [requireAuth, idempotency];
+  app.use("/api/me/challenges", signedIn, challengeRoutes);
+  app.use("/api/me/taste", signedIn, tasteRoutes);
+  app.use("/api/me", signedIn, libraryRoutes);
+  app.use("/api/me", signedIn, meRoutes);
+  app.use("/api/boards", signedIn, boardRoutes);
+  app.use("/api/users", signedIn, usersRouter);
+  app.use("/api/friends", signedIn, friendsRouter);
+  app.use("/api/activity", signedIn, activityRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

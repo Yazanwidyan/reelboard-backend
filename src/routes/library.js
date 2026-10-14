@@ -20,6 +20,22 @@ const router = Router();
 
 const movieParam = z.object({ movieId });
 
+// GET /api/me/library — the whole movieStore in one response: watchlist,
+// watched, tonight's pick and manually unlocked collections.
+router.get("/library", (req, res) => {
+  const state = getUserState(req.userId);
+  res.json({
+    bucketList: listWatchlist(req.userId),
+    watched: listWatched(req.userId),
+    ...toPick(state),
+    unlockedCollections: fromJSON(state.unlocked_collections, []),
+  });
+});
+
+// Deletes succeed even when there's nothing left to delete: the app may
+// send the same removal twice (a retry, or another device got there first),
+// and either way the movie is gone.
+
 // ---- Watchlist (movieStore.bucketList) -----------------------------------
 
 router.get("/watchlist", (req, res) => {
@@ -52,8 +68,7 @@ router.delete("/watchlist/:movieId", validate(movieParam, "params"), (req, res) 
     req.userId,
     req.params.movieId,
   ]);
-  if (!changes) throw notFound("Not on your watchlist");
-  retractActivity(req.userId, "watchlist", req.params.movieId);
+  if (changes) retractActivity(req.userId, "watchlist", req.params.movieId);
   res.status(204).end();
 });
 
@@ -155,12 +170,11 @@ router.post("/watched/:movieId/rewatch", validate(movieParam, "params"), (req, r
 
 router.delete("/watched/:movieId", validate(movieParam, "params"), (req, res) => {
   const { movieId: id } = req.params;
-  const { changes } = transaction(() => {
+  transaction(() => {
     retractActivity(req.userId, "watched", id);
     retractActivity(req.userId, "tier", id);
-    return run("DELETE FROM watched WHERE user_id = ? AND movie_id = ?", [req.userId, id]);
+    run("DELETE FROM watched WHERE user_id = ? AND movie_id = ?", [req.userId, id]);
   });
-  if (!changes) throw notFound("You haven't watched this movie");
   res.status(204).end();
 });
 

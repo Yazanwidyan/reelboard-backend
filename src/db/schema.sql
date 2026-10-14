@@ -160,3 +160,18 @@ CREATE TABLE IF NOT EXISTS activity (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS activity_by_user ON activity (user_id, created_at DESC);
+
+-- Responses to changes sent with an "Idempotency-Key" header, so a change
+-- the app re-sends (it lost the reply, or replayed its offline queue) is
+-- applied once. Kept a week (see middleware/idempotency.js).
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key        TEXT NOT NULL,
+  method     TEXT NOT NULL,
+  path       TEXT NOT NULL,
+  status     INTEGER NOT NULL,
+  body       TEXT,                      -- JSON response body, null for 204
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, key)
+);
+CREATE INDEX IF NOT EXISTS idempotency_keys_by_age ON idempotency_keys (created_at);

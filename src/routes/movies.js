@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { all, catalogMeta } from "../db/index.js";
@@ -95,17 +96,37 @@ const listClips = () =>
     end: row.end,
   }));
 
+// The catalog only changes when the server restarts (db/index.js loads
+// data/catalog.json on start), so it's serialized and hashed once.
+let catalogResponse = null;
+const getCatalogResponse = () => {
+  if (!catalogResponse) {
+    const body = JSON.stringify({
+      movies: getAllMovies(),
+      reelClips: listClips(),
+      clipSeconds: catalogMeta.clipSeconds,
+      dimensions: catalogMeta.dimensions,
+      themes: catalogMeta.themes,
+    });
+    const hash = crypto.createHash("sha256").update(body).digest("base64url").slice(0, 27);
+    catalogResponse = { body, etag: `"${hash}"` };
+  }
+  return catalogResponse;
+};
+
 // GET /api/movies/catalog — the whole catalog in one response: every
 // movie (with cast, details and vibe), the Reels clips, and the Taste DNA
-// vocabulary. The app loads this once at sign-in instead of bundling movies.
+// vocabulary. The app keeps a copy on the device and sends its ETag back as
+// If-None-Match; while the catalog is unchanged the answer is an empty 304.
 router.get("/catalog", (req, res) => {
-  res.json({
-    movies: getAllMovies(),
-    reelClips: listClips(),
-    clipSeconds: catalogMeta.clipSeconds,
-    dimensions: catalogMeta.dimensions,
-    themes: catalogMeta.themes,
-  });
+  const { body, etag } = getCatalogResponse();
+  res.set({ ETag: etag, "Cache-Control": "no-cache" });
+  // Compared here rather than left to Express's req.fresh, which treats any
+  // request carrying "Cache-Control: no-cache" as stale — and fetch() adds
+  // exactly that to conditional requests.
+  const known = (req.get("if-none-match") ?? "").split(",").map((tag) => tag.trim());
+  if (known.includes(etag)) return res.status(304).end();
+  res.type("json").send(body);
 });
 
 // GET /api/movies/reels — trailer clips for the Reels feed.

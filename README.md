@@ -38,6 +38,8 @@ npm run enrich-omdb       # updates data/catalog.json; restart the server after
 - **Movie ids:** the app's ids (`m1` … `m250`).
 - **Response shapes:** these match the app's Zustand stores. For example, a watched entry is `{ movieId, timestamp, tier, rating, watchCount }`, a board is `{ id, name, movieIds, createdAt, updatedAt }`, and a friend is `{ id, name, handle, color, level, watched: [{ movieId, tier }] }`. You can hydrate stores directly from responses.
 - **Errors:** `{ error: { message, details? } }`. Validation errors (400) list each bad field in `details`.
+- **Idempotency-Key:** any signed-in change (POST, PUT, PATCH, DELETE) can carry an `Idempotency-Key` header: 8–100 characters of `A–Z a–z 0–9 _ -`, unique per change. If the same key arrives again, the server sends back the first response (marked `Idempotent-Replayed: true`) without applying the change a second time. Using the key for a different request returns `409`. Keys are per account and kept for 7 days. The app sends one with every change, so re-sending after a lost reply or a restart is safe.
+- **Deletes don't fail when the thing is already gone:** removing a movie that's no longer on the watchlist, watched list or a board, deleting a board that no longer exists, or skipping when there's no active challenge all succeed. The end state is what was asked for.
 
 ## Endpoints
 
@@ -65,7 +67,7 @@ Until these are set, the buttons explain what's missing, and the server answers 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/movies` | Query: `q`, `genres=Drama,Comedy` (matches any), `decade`, `runtime`, `minRating`, `director`, `ids=m1,m2`, `sort=rank\|rating\|year\|runtime\|title`, `order`, `page`, `limit` |
-| GET | `/api/movies/catalog` | the whole catalog in one response: every movie, the Reels clips, and the Taste DNA vocabulary. The app loads this at sign-in. |
+| GET | `/api/movies/catalog` | the whole catalog in one response: every movie, the Reels clips, and the Taste DNA vocabulary. Sent with an `ETag`. Send it back as `If-None-Match` and, while the catalog is unchanged, the answer is an empty `304`. |
 | GET | `/api/movies/meta` | genres, decades, runtimes, Taste DNA dimensions and themes |
 | GET | `/api/movies/reels` | trailer clips for the Reels feed |
 | GET | `/api/movies/:id` | one movie |
@@ -73,7 +75,7 @@ Until these are set, the buttons explain what's missing, and the server answers 
 ### Me
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/me` | **Everything at once:** profile, settings, library, boards, challenges, taste, recent searches. Use it to hydrate the app on sign-in. |
+| GET | `/api/me` | **Everything at once:** profile, settings, library, boards, challenges, taste, recent searches. The app uses it on sign-in, and to refresh everything when it comes back to the front. |
 | POST | `/api/me/import` | Uploads the app's local AsyncStorage stores (`{ movieStore, boardStore, profileStore, userStore, tasteStore, challengeStore, languageStore, themeStore, tipsStore, recentSearchStore }`, each optional). Each store you send **replaces** that part of the account. |
 | DELETE | `/api/me` | `{ password }`. Deletes the account and all its data. |
 | GET / PATCH | `/api/me/profile` | `{ displayName, bio, avatarUri, handle, xp, level }` |
@@ -85,6 +87,7 @@ Until these are set, the buttons explain what's missing, and the server answers 
 ### Library
 | Method | Path | Notes |
 |---|---|---|
+| GET | `/api/me/library` | the whole library at once: `{ bucketList, watched, pickedMovie, pickMood, unlockedCollections }` |
 | GET / POST | `/api/me/watchlist` | POST `{ movieId }` |
 | DELETE | `/api/me/watchlist/:movieId`, `/api/me/watchlist` | remove one, or clear |
 | GET / POST | `/api/me/watched` | POST `{ movieId, tier?, watchedAt? }`. This also removes the movie from the watchlist, clears it as the pick, and completes the active challenge if the movie is its target (returned as `completedChallenge`). |
@@ -136,7 +139,11 @@ Until these are set, the buttons explain what's missing, and the server answers 
 
 ## The app and this server
 
-The ReelBoard app requires an account and treats this server as the source of truth. Its stores hold the signed-in account in memory only. On launch or sign-in it loads `GET /api/me` and the movie catalog (`GET /api/movies/catalog`), and every change is sent to the API as it happens (see the app's `src/services/sync.js`). If a change is rejected or the server can't be reached, the app reloads from the server. The phone keeps only the session token, plus language and theme so the sign-in screen looks right.
+The ReelBoard app requires an account and treats this server as the source of truth. It uses TanStack Query to cache the account on the device (see the app's `src/services/queryClient.js`):
+
+- **Reading:** each part of the account is its own query, fetched from its own endpoint (`/me/library`, `/boards`, `/me/profile`, `/me/settings`, `/me/taste`, `/me/challenges`, `/me/searches`). On sign-in, and whenever the app comes back to the front, `GET /api/me` fills all of them in one request.
+- **Saved on the phone:** the cache is saved on the device, so the app opens straight onto the last data it had, even offline. The catalog is saved separately and checked with its `ETag`, so it's only downloaded when it changes.
+- **Changing:** a change shows in the app at once and is queued as an API call with an `Idempotency-Key`. Queued calls go out one at a time, in order. Offline they wait, saved on the device so a restart doesn't lose them, and go out once the server can be reached. When the queue is empty, the parts of the account it touched are refetched. If the server rejects a change, the app says so and the refetch undoes it.
 
 **Running both in development:**
 

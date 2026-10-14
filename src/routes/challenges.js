@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
 import { run, toJSON, transaction } from "../db/index.js";
-import { notFound } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { getChallenges } from "../lib/library.js";
 import { assertMovie } from "../lib/movies.js";
@@ -34,13 +33,14 @@ router.post("/active", validate(z.object({ challenge })), (req, res) => {
   res.status(201).json(getChallenges(req.userId));
 });
 
+// No active challenge (already skipped, or completed meanwhile) is fine:
+// either way there's nothing left to skip.
 router.post("/active/skip", (req, res) => {
-  const { changes } = run(
+  run(
     `UPDATE challenges SET status = 'skipped', resolved_at = ?
      WHERE user_id = ? AND status = 'active'`,
     [Date.now(), req.userId],
   );
-  if (!changes) throw notFound("No active challenge");
   res.json(getChallenges(req.userId));
 });
 
