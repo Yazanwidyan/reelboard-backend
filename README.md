@@ -15,16 +15,21 @@ npm test                  # end-to-end tests against an in-memory database
 
 The database file is created at `data/reelboard.db` on first start. The movie catalog in `data/catalog.json` is loaded into it on every start.
 
-### Refreshing the catalog
+### The movie catalog
 
-`data/catalog.json` is generated from the app's own data files (`src/data/movies.js`, `cast.js`, `details.js`, `vibes.js`, `reelClips.js`), so the API serves exactly the movies the app ships with. After changing those files:
+`data/catalog.json` is the one place movies are maintained. The app ships no movie data: it loads the whole catalog from `GET /api/movies/catalog` at sign-in. The file holds:
+
+- **`movies`:** each with `id`, `rank`, `title`, `year`, `rating`, `runtime`, `genres`, `director`, `cast`, `details`, `description`, `franchise`, `poster`, `backdrop`, and a `vibe` (`{ dims: [6 × 1–5], themes }`, the Taste DNA values).
+- **`reelClips`:** the YouTube trailer windows for Reels.
+- **`dimensions` and `themes`:** the Taste DNA vocabulary.
+
+To change it, edit the file and restart the server. Keep movie ids stable, because accounts refer to them.
+
+To refresh cast, details (critic scores, awards, box office…) and IMDb ratings from [OMDb](https://www.omdbapi.com), put `OMDB_API_KEY` in `.env`, then:
 
 ```bash
-npm run import-catalog                 # reads ../Reelboard
-npm run import-catalog -- C:/path/to/Reelboard
+npm run enrich-omdb       # updates data/catalog.json; restart the server after
 ```
-
-Then restart the server.
 
 ## Conventions
 
@@ -47,6 +52,7 @@ Then restart the server.
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/movies` | Query: `q`, `genres=Drama,Comedy` (matches any), `decade`, `runtime`, `minRating`, `director`, `ids=m1,m2`, `sort=rank\|rating\|year\|runtime\|title`, `order`, `page`, `limit` |
+| GET | `/api/movies/catalog` | the whole catalog in one response: every movie, the Reels clips, and the Taste DNA vocabulary. The app loads this at sign-in. |
 | GET | `/api/movies/meta` | genres, decades, runtimes, Taste DNA dimensions and themes |
 | GET | `/api/movies/reels` | trailer clips for the Reels feed |
 | GET | `/api/movies/:id` | one movie |
@@ -117,7 +123,7 @@ Then restart the server.
 
 ## The app and this server
 
-The ReelBoard app requires an account and treats this server as the source of truth. Its stores hold the signed-in account in memory only. On launch or sign-in it loads `GET /api/me`, and every change is sent to the API as it happens (see the app's `src/services/sync.js`). If a change is rejected or the server can't be reached, the app reloads from the server. The phone keeps only the session token, plus language and theme so the sign-in screen looks right.
+The ReelBoard app requires an account and treats this server as the source of truth. Its stores hold the signed-in account in memory only. On launch or sign-in it loads `GET /api/me` and the movie catalog (`GET /api/movies/catalog`), and every change is sent to the API as it happens (see the app's `src/services/sync.js`). If a change is rejected or the server can't be reached, the app reloads from the server. The phone keeps only the session token, plus language and theme so the sign-in screen looks right.
 
 **Running both in development:**
 
@@ -134,7 +140,6 @@ If a phone can't connect, allow port 4000 through the Windows firewall for Node.
 
 - **Avatar upload:** `avatarUri` is stored as given. A local `file://` URI from the image picker won't show for friends until uploads are added.
 - **XP and level are reported by the app:** the server doesn't recompute them.
-- **The movie catalog is bundled in the app:** it's the same data this server serves from `data/catalog.json`, but the app reads its own copy rather than `GET /api/movies`.
 - **Session token storage:** the token is in AsyncStorage. Switch it to `expo-secure-store` for encrypted storage (this needs a new dev build).
 - **HTTPS:** release builds of the app need an HTTPS server URL. Android blocks plain HTTP outside development.
 - **No rate limiting on `/api/auth`:** add it (e.g. `express-rate-limit`) before going public.

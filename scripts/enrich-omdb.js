@@ -33,7 +33,16 @@ const IMDB_IDS = {
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-const clean = (value) => (value && value !== "N/A" ? value.trim() : null);
+// OMDb sends some text HTML-escaped ("O&apos;Connor").
+const ENTITIES = { amp: "&", apos: "'", quot: '"', lt: "<", gt: ">", nbsp: " " };
+const decode = (text) =>
+  text.replace(/&(#\d+|#x[\da-f]+|[a-z]+);/gi, (match, code) => {
+    if (code[0] !== "#") return ENTITIES[code.toLowerCase()] ?? match;
+    return String.fromCodePoint(
+      code[1].toLowerCase() === "x" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10),
+    );
+  });
+const clean = (value) => (value && value !== "N/A" ? decode(value.trim()) : null);
 
 const fetchOmdb = async (movie) => {
   const imdbId = movie.details?.imdbId ?? IMDB_IDS[`${movie.title}|${movie.year}`];
