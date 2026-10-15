@@ -3,6 +3,7 @@ import config from "./config.js";
 import { closeDatabase, openDatabase } from "./db/index.js";
 import { pruneActivity } from "./lib/activity.js";
 import { updateAllLevels } from "./lib/xp.js";
+import { pruneMovieNights } from "./routes/movieNights.js";
 
 const MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
@@ -13,13 +14,16 @@ openDatabase();
 const users = updateAllLevels();
 console.log(`Levels checked for ${users} account(s)`);
 
-// Housekeeping: drop old friends-feed events, now and every few hours.
+// Housekeeping, now and every few hours: old friends-feed events and
+// finished movie nights.
 const maintain = () => {
   try {
     const removed = pruneActivity();
     if (removed > 0) console.log(`Activity cleanup: removed ${removed} old event(s)`);
+    const nights = pruneMovieNights();
+    if (nights > 0) console.log(`Removed ${nights} finished movie night(s)`);
   } catch (error) {
-    console.error("Activity cleanup failed", error);
+    console.error("Cleanup failed", error);
   }
 };
 maintain();

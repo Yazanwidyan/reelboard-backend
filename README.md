@@ -31,11 +31,26 @@ To refresh cast, details (critic scores, awards, box office…) and IMDb ratings
 npm run enrich-omdb       # updates data/catalog.json; restart the server after
 ```
 
+**Adding movies.** The first 250 movies were tagged by hand. The rest come from `data/seed-movies.txt`, one per line as `Title|Year|Franchise|imdbId`. Franchise and IMDb id are optional; an IMDb id pins the exact film when a title is ambiguous (remakes, common titles). Then:
+
+```bash
+npm run add-movies                # looks new seeds up on OMDb, adds them to data/catalog.json
+npm run add-movies -- --limit 50  # at most 50 lookups this run
+npm run add-movies -- --offline   # only uses data/omdb-cache.json, no requests
+```
+
+- **Quota:** OMDb's free key allows 1,000 requests a day. Answers are cached in `data/omdb-cache.json` (not committed), so when the quota runs out, run it again the next day and it carries on where it stopped.
+- **What gets skipped:** a lookup whose title or year doesn't match the seed, and anything without a poster or rating, under 40 minutes, or a documentary. Movies added earlier that no longer match their seed are removed again.
+- **Vibes:** added movies get an estimated Taste DNA vibe, learned from the 250 hand-tagged ones (`vibeSource: "estimated"`, against `"hand"`). Hand-tag the ones that matter most to make them exact.
+- **Rank:** added movies are ranked after the first 250 by IMDb's weighted rating, so a 9.0 with 40 votes doesn't outrank a 8.5 with a million.
+
+Restart the server after adding movies. The app picks up the new catalog on its next start (its `ETag` changes).
+
 ## Conventions
 
 - **Auth:** send `Authorization: Bearer <token>`. `register` and `login` return `{ token, user }`.
 - **Timestamps:** milliseconds since the epoch, the same as `Date.now()` in the app.
-- **Movie ids:** the app's ids (`m1` … `m250`).
+- **Movie ids:** the catalog's ids (`m1`, `m2`, …). They never change or get reused, because accounts refer to them. Each movie's IMDb id is in `details.imdbId`.
 - **Response shapes:** these match the app's Zustand stores. For example, a watched entry is `{ movieId, timestamp, tier, rating, watchCount }`, a board is `{ id, name, movieIds, createdAt, updatedAt }`, and a friend is `{ id, name, handle, color, level, watched: [{ movieId, tier }] }`. You can hydrate stores directly from responses.
 - **Errors:** `{ error: { message, details? } }`. Validation errors (400) list each bad field in `details`.
 - **Idempotency-Key:** any signed-in change (POST, PUT, PATCH, DELETE) can carry an `Idempotency-Key` header: 8–100 characters of `A–Z a–z 0–9 _ -`, unique per change. If the same key arrives again, the server sends back the first response (marked `Idempotent-Replayed: true`) without applying the change a second time. Using the key for a different request returns `409`. Keys are per account and kept for 7 days. The app sends one with every change, so re-sending after a lost reply or a restart is safe.
@@ -139,6 +154,31 @@ Until these are set, the buttons explain what's missing, and the server answers 
 
 **Cleanup:** the feed keeps the last 90 days and at most each person's newest 200 events. Older ones are deleted when the server starts and every 6 hours after (`pruneActivity` in `src/lib/activity.js`).
 
+### Movie night on everyone's phones
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/movie-nights` | `{ movieIds }`, 4–30 movies. Starts a night with you as host. Returns `{ night }` with its 6-character `code`. |
+| POST | `/api/movie-nights/join` | `{ code }`. Joins it (up to 8 people). |
+| GET | `/api/movie-nights/:id` | the night as you see it. The app checks every few seconds. |
+| PUT | `/api/movie-nights/:id/picks` | `{ kept: [movieId] }`. Your swipes are done. |
+| POST | `/api/movie-nights/:id/close` | host only: shows the results now, with whoever has finished. |
+| DELETE | `/api/movie-nights/:id/members/me` | leave. When the host leaves, the night ends for everyone. |
+
+- **The rules:** everyone swipes the same stack. Other people's picks stay hidden until everyone (at least two people) is done, or the host closes it. Then `results` lists the `matches` (kept by everyone who finished) and per-movie `counts`.
+- **Invites:** the code goes out as a link, `reelboard://night/CODE`, which opens the room in the app. Codes leave out 0/O and 1/I/L so they're easy to read out.
+- **Notifications:** the host hears when someone joins, and everyone hears when the results are in (see Push below).
+- **Cleanup:** a night lasts 12 hours. Ended ones are deleted with the activity cleanup, every 6 hours.
+
+### Push notifications
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/api/me/push-tokens` | `{ token, platform? }`: this phone's Expo push token. |
+| DELETE | `/api/me/push-tokens` | `{ token }`. The app sends this when you sign out or switch notifications off. |
+
+The server sends through Expo's push service (`src/lib/push.js`) for: friend requests, accepted requests, someone joining your movie night, and movie night results. Messages are in the account's language (English or Arabic). Tokens Expo reports as no longer registered are deleted.
+
+**Before server push works,** the app needs an EAS project id: run `eas init` in `../Reelboard` (free Expo account) and make a new build. Until then the app still gets its own reminders, which need no server: tonight's pick at 7:30 pm and the monthly recap on the 1st.
+
 ### XP and level
 
 The server works these out from the watch history (`src/lib/xp.js`) and stores them on the account, so the level friends see can't be faked:
@@ -177,4 +217,5 @@ If a phone can't connect, allow port 4000 through the Windows firewall for Node.
 - **Avatar upload:** `avatarUri` is stored as given. A local `file://` URI from the image picker won't show for friends until uploads are added.
 - **Session token storage:** the token is in AsyncStorage. Switch it to `expo-secure-store` for encrypted storage (this needs a new dev build).
 - **HTTPS:** release builds of the app need an HTTPS server URL. Android blocks plain HTTP outside development.
-- **No rate limiting on `/api/auth`:** add it (e.g. `express-rate-limit`) before going public.
+- **No rate limiting on `/api/auth`:** add it (e.g. `express-rate-limit`) before going public. `/api/movie-nights/join` should get the same, so codes can't be guessed.
+- **Where to watch:** needs a TMDB API key (free). OMDb doesn't have streaming availability.

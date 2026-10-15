@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { createApp } from "../src/app.js";
-import { all, closeDatabase, openDatabase, run } from "../src/db/index.js";
+import { all, closeDatabase, get, openDatabase, run } from "../src/db/index.js";
+import { pushTransport } from "../src/lib/push.js";
 import { pruneActivity } from "../src/lib/activity.js";
 import { verifiers } from "../src/lib/social.js";
+import fs from "node:fs";
+
+// However many movies data/catalog.json holds — it grows (scripts/add-movies.js).
+const CATALOG_SIZE = JSON.parse(
+  fs.readFileSync(new URL("../data/catalog.json", import.meta.url), "utf8"),
+).movies.length;
 
 let server;
 let base;
@@ -169,7 +176,7 @@ describe("google and apple sign-in", () => {
 describe("movies", () => {
   test("list, filter, search, fetch one, meta, reels", async () => {
     const all = await api("GET", "/movies?limit=250");
-    assert.equal(all.body.total, 250);
+    assert.equal(all.body.total, CATALOG_SIZE);
     assert.equal(all.body.movies[0].id, "m1");
 
     const filtered = await api("GET", "/movies?genres=Animation&decade=2010s&limit=100");
@@ -205,7 +212,7 @@ describe("movies", () => {
     assert.equal((await api("GET", "/movies?decade=1850s")).status, 400);
 
     const catalog = await api("GET", "/movies/catalog");
-    assert.equal(catalog.body.movies.length, 250);
+    assert.equal(catalog.body.movies.length, CATALOG_SIZE);
     assert.equal(catalog.body.movies[0].vibe.dims.length, 6);
     assert.ok(catalog.body.movies.every((movie) => Array.isArray(movie.cast)));
     assert.ok(catalog.body.reelClips.length > 0);
@@ -419,6 +426,158 @@ describe("xp and level", () => {
     const own = (await api("GET", "/me/profile", { token: a.token })).body.profile;
     assert.ok(own.level > 1);
     assert.equal(friend.level, own.level);
+  });
+});
+
+describe("movie night across phones", () => {
+  test("host, join by code, hidden picks, reveal of what everyone kept", async () => {
+    const host = await register("Night Host", "nighthost");
+    const guest = await register("Night Guest", "nightguest");
+    const third = await register("Night Third", "nightthird");
+    const stranger = await register("Night Stranger", "nightstranger");
+    const stack = ["m1", "m2", "m3", "m4", "m5"];
+
+    assert.equal((await api("POST", "/movie-nights", { token: host.token, body: { movieIds: ["m1", "m2"] } })).status, 400);
+    const created = await api("POST", "/movie-nights", { token: host.token, body: { movieIds: stack } });
+    assert.equal(created.status, 201);
+    const night = created.body.night;
+    assert.match(night.code, /^[A-HJ-NP-Z2-9]{6}$/);
+    assert.equal(night.isHost, true);
+    assert.equal(night.results, null);
+
+    assert.equal((await api("POST", "/movie-nights/join", { token: guest.token, body: { code: "ZZZZZZ" } })).status, 404);
+    const joined = await api("POST", "/movie-nights/join", { token: guest.token, body: { code: night.code.toLowerCase() } });
+    assert.equal(joined.status, 200);
+    assert.equal(joined.body.night.members.length, 2);
+    await api("POST", "/movie-nights/join", { token: third.token, body: { code: night.code } });
+
+    // Strangers can't look in.
+    assert.equal((await api("GET", `/movie-nights/${night.id}`, { token: stranger.token })).status, 404);
+
+    // Picks must come from the stack; then they stay hidden until all are done.
+    assert.equal((await api("PUT", `/movie-nights/${night.id}/picks`, { token: host.token, body: { kept: ["m99"] } })).status, 400);
+    await api("PUT", `/movie-nights/${night.id}/picks`, { token: host.token, body: { kept: ["m1", "m2", "m3"] } });
+    let view = (await api("PUT", `/movie-nights/${night.id}/picks`, { token: guest.token, body: { kept: ["m2", "m3", "m5"] } })).body.night;
+    assert.equal(view.results, null, "not revealed while someone is still swiping");
+    assert.deepEqual(view.me.kept, ["m2", "m3", "m5"]);
+    assert.deepEqual(view.members.map((m) => m.done), [true, true, false]);
+
+    view = (await api("PUT", `/movie-nights/${night.id}/picks`, { token: third.token, body: { kept: ["m3", "m2"] } })).body.night;
+    assert.equal(view.results.everyoneDone, true);
+    assert.deepEqual(view.results.matches, ["m2", "m3"]);
+    assert.equal(view.results.counts.m1, 1);
+    assert.equal(view.results.voters, 3);
+
+    // Once it's over nobody new can join; the host ending it twice is fine.
+    assert.equal((await api("POST", `/movie-nights/${night.id}/close`, { token: guest.token })).status, 403);
+    await api("POST", `/movie-nights/${night.id}/close`, { token: host.token });
+    assert.equal((await api("POST", "/movie-nights/join", { token: stranger.token, body: { code: night.code } })).status, 409);
+  });
+
+  test("the host can end it early; the host leaving ends it for everyone", async () => {
+    const host = await register("Early Host", "earlyhost");
+    const guest = await register("Early Guest", "earlyguest");
+    const night = (await api("POST", "/movie-nights", { token: host.token, body: { movieIds: ["m1", "m2", "m3", "m4"] } })).body.night;
+    await api("POST", "/movie-nights/join", { token: guest.token, body: { code: night.code } });
+    await api("PUT", `/movie-nights/${night.id}/picks`, { token: host.token, body: { kept: ["m1"] } });
+
+    const closed = (await api("POST", `/movie-nights/${night.id}/close`, { token: host.token })).body.night;
+    assert.equal(closed.status, "closed");
+    assert.equal(closed.results.everyoneDone, false);
+    assert.deepEqual(closed.results.matches, [], "one finisher can't make a match");
+
+    assert.equal((await api("DELETE", `/movie-nights/${night.id}/members/me`, { token: host.token })).status, 204);
+    assert.equal((await api("GET", `/movie-nights/${night.id}`, { token: guest.token })).status, 404);
+  });
+
+  test("no more than 8 people", async () => {
+    const host = await register("Full Host", "fullhost");
+    const night = (await api("POST", "/movie-nights", { token: host.token, body: { movieIds: ["m1", "m2", "m3", "m4"] } })).body.night;
+    for (let i = 0; i < 7; i += 1) {
+      const guest = await register(`Full Guest ${i}`, `fullguest${i}`);
+      assert.equal((await api("POST", "/movie-nights/join", { token: guest.token, body: { code: night.code } })).status, 200);
+    }
+    const late = await register("Too Late", "toolate");
+    assert.equal((await api("POST", "/movie-nights/join", { token: late.token, body: { code: night.code } })).status, 409);
+  });
+});
+
+describe("push notifications", () => {
+  // Record what would go to Expo instead of sending it.
+  const sent = [];
+  const realSend = pushTransport.send;
+  let tickets = () => [];
+  before(() => {
+    pushTransport.send = async (messages) => {
+      sent.push(...messages);
+      return tickets(messages);
+    };
+  });
+  after(() => {
+    pushTransport.send = realSend;
+  });
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+  test("friend requests and acceptances notify the other person, in their language", async () => {
+    const asker = await register("Push Asker", "pushasker");
+    const friend = await register("Push Friend", "pushfriend");
+    await api("PATCH", "/me/settings", { token: friend.token, body: { language: "ar" } });
+    assert.equal((await api("POST", "/me/push-tokens", { token: friend.token, body: { token: "ExponentPushToken[friend-1]", platform: "android" } })).status, 204);
+    assert.equal((await api("POST", "/me/push-tokens", { token: asker.token, body: { token: "ExponentPushToken[asker-1]" } })).status, 204);
+
+    sent.length = 0;
+    await api("POST", "/friends/requests", { token: asker.token, body: { userId: friend.user.id } });
+    await settle();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, "ExponentPushToken[friend-1]");
+    assert.match(sent[0].title, /Push Asker/);
+    assert.match(sent[0].title, /صديق/, "in the friend's language (Arabic)");
+    assert.equal(sent[0].data.url, "reelboard://friends");
+
+    sent.length = 0;
+    await api("POST", `/friends/requests/${asker.user.id}/accept`, { token: friend.token });
+    await settle();
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].to, "ExponentPushToken[asker-1]");
+    assert.equal(sent[0].title, "Push Friend accepted your friend request");
+  });
+
+  test("movie night: the host hears who joins; everyone hears when results are in", async () => {
+    const host = await register("Push Host", "pushhost");
+    const guest = await register("Push Guest", "pushguest");
+    await api("POST", "/me/push-tokens", { token: host.token, body: { token: "ExponentPushToken[host-1]" } });
+    await api("POST", "/me/push-tokens", { token: guest.token, body: { token: "ExponentPushToken[guest-1]" } });
+    const night = (await api("POST", "/movie-nights", { token: host.token, body: { movieIds: ["m1", "m2", "m3", "m4"] } })).body.night;
+
+    sent.length = 0;
+    await api("POST", "/movie-nights/join", { token: guest.token, body: { code: night.code } });
+    await settle();
+    assert.deepEqual(sent.map((m) => [m.to, m.title]), [["ExponentPushToken[host-1]", "Push Guest joined your movie night"]]);
+    assert.equal(sent[0].data.url, `reelboard://night/${night.code}`);
+
+    sent.length = 0;
+    await api("PUT", `/movie-nights/${night.id}/picks`, { token: host.token, body: { kept: ["m1"] } });
+    await settle();
+    assert.equal(sent.length, 0, "nothing until the last person finishes");
+    await api("PUT", `/movie-nights/${night.id}/picks`, { token: guest.token, body: { kept: ["m1"] } });
+    await settle();
+    assert.deepEqual(sent.map((m) => m.to), ["ExponentPushToken[host-1]"], "everyone but the last finisher");
+    assert.equal(sent[0].title, "Everyone's done swiping");
+  });
+
+  test("a token Expo says is gone is forgotten; tokens can be removed", async () => {
+    const user = await register("Push Gone", "pushgone");
+    const other = await register("Push Other", "pushother");
+    await api("POST", "/me/push-tokens", { token: user.token, body: { token: "ExponentPushToken[gone-1]" } });
+    tickets = (messages) => messages.map(() => ({ status: "error", details: { error: "DeviceNotRegistered" } }));
+    await api("POST", "/friends/requests", { token: other.token, body: { userId: user.user.id } });
+    await settle();
+    tickets = () => [];
+    assert.equal(get("SELECT 1 AS present FROM push_tokens WHERE token = ?", ["ExponentPushToken[gone-1]"]), null);
+
+    await api("POST", "/me/push-tokens", { token: user.token, body: { token: "ExponentPushToken[keep-1]" } });
+    assert.equal((await api("DELETE", "/me/push-tokens", { token: user.token, body: { token: "ExponentPushToken[keep-1]" } })).status, 204);
+    assert.equal(get("SELECT 1 AS present FROM push_tokens WHERE token = ?", ["ExponentPushToken[keep-1]"]), null);
   });
 });
 

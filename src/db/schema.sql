@@ -175,3 +175,36 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
   PRIMARY KEY (user_id, key)
 );
 CREATE INDEX IF NOT EXISTS idempotency_keys_by_age ON idempotency_keys (created_at);
+
+-- Movie nights across phones: the host makes a room with a stack of movies
+-- and a short code; friends join with the code, everyone swipes on their own
+-- phone, and the movies everyone kept are revealed once all are done.
+CREATE TABLE IF NOT EXISTS movie_nights (
+  id         TEXT PRIMARY KEY,
+  code       TEXT NOT NULL UNIQUE,
+  host_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  movie_ids  TEXT NOT NULL,             -- JSON movie ids, in swipe order
+  status     TEXT NOT NULL CHECK (status IN ('open','closed')),
+  created_at INTEGER NOT NULL,
+  expires_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS movie_night_members (
+  night_id  TEXT NOT NULL REFERENCES movie_nights(id) ON DELETE CASCADE,
+  user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  joined_at INTEGER NOT NULL,
+  kept      TEXT,                       -- JSON movie ids, null until done
+  done_at   INTEGER,
+  PRIMARY KEY (night_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS movie_night_members_by_user ON movie_night_members (user_id);
+
+-- Phones to send push notifications to (Expo push tokens). One account can
+-- have several phones; a token that Expo reports as gone is removed.
+CREATE TABLE IF NOT EXISTS push_tokens (
+  token      TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  platform   TEXT,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS push_tokens_by_user ON push_tokens (user_id);

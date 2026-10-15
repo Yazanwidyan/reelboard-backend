@@ -13,7 +13,9 @@ import challengeRoutes from "./routes/challenges.js";
 import { friendsRouter, usersRouter } from "./routes/friends.js";
 import libraryRoutes from "./routes/library.js";
 import meRoutes from "./routes/me.js";
+import movieNightRoutes from "./routes/movieNights.js";
 import movieRoutes from "./routes/movies.js";
+import pushRoutes from "./routes/push.js";
 import tasteRoutes from "./routes/taste.js";
 
 // Builds the Express app. The database must already be open (see server.js).
@@ -44,12 +46,14 @@ export const createApp = () => {
   const signedIn = [requireAuth, idempotency];
   app.use("/api/me/challenges", signedIn, challengeRoutes);
   app.use("/api/me/taste", signedIn, tasteRoutes);
+  app.use("/api/me/push-tokens", signedIn, pushRoutes);
   app.use("/api/me", signedIn, libraryRoutes);
   app.use("/api/me", signedIn, meRoutes);
   app.use("/api/boards", signedIn, boardRoutes);
   app.use("/api/users", signedIn, usersRouter);
   app.use("/api/friends", signedIn, friendsRouter);
   app.use("/api/activity", signedIn, activityRoutes);
+  app.use("/api/movie-nights", signedIn, movieNightRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

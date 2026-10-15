@@ -3,9 +3,14 @@ import { z } from "zod";
 import { all, fromJSON, get, run } from "../db/index.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
 import { listBoards } from "../lib/library.js";
+import { notify } from "../lib/push.js";
 import { handle } from "../lib/schemas.js";
 import { areFriends, friendIdsOf, getUserRow, toPublicUser } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
+
+// Notifications about friend requests open the Friends screen.
+const FRIENDS_LINK = "reelboard://friends";
+const nameOf = (userId) => getUserRow(userId)?.display_name ?? "Someone";
 
 // Replaces the app's data/mockFriends.js. A friend comes back in the same
 // shape as a mock friend — { id, name, handle, color, level, watched:
@@ -140,6 +145,7 @@ friendsRouter.post(
          WHERE requester_id = ? AND addressee_id = ?`,
         [Date.now(), target.id, req.userId],
       );
+      notify([target.id], "friendAccepted", [nameOf(req.userId)], FRIENDS_LINK);
       return res.json({ relationship: "friends", user: toFriend(target) });
     }
     run(
@@ -147,6 +153,7 @@ friendsRouter.post(
        VALUES (?, ?, 'pending', ?)`,
       [req.userId, target.id, Date.now()],
     );
+    notify([target.id], "friendRequest", [nameOf(req.userId)], FRIENDS_LINK);
     res.status(201).json({ relationship: "outgoing", user: toPublicUser(target) });
   },
 );
@@ -158,6 +165,7 @@ friendsRouter.post("/requests/:userId/accept", validate(userParam, "params"), (r
     [Date.now(), req.params.userId, req.userId],
   );
   if (!changes) throw notFound("No pending request from this user");
+  notify([req.params.userId], "friendAccepted", [nameOf(req.userId)], FRIENDS_LINK);
   res.json({ relationship: "friends", user: toFriend(getUserRow(req.params.userId)) });
 });
 
