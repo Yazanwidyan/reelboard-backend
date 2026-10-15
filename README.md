@@ -78,7 +78,7 @@ Until these are set, the buttons explain what's missing, and the server answers 
 | GET | `/api/me` | **Everything at once:** profile, settings, library, boards, challenges, taste, recent searches. The app uses it on sign-in, and to refresh everything when it comes back to the front. |
 | POST | `/api/me/import` | Uploads the app's local AsyncStorage stores (`{ movieStore, boardStore, profileStore, userStore, tasteStore, challengeStore, languageStore, themeStore, tipsStore, recentSearchStore }`, each optional). Each store you send **replaces** that part of the account. |
 | DELETE | `/api/me` | `{ password }`. Deletes the account and all its data. |
-| GET / PATCH | `/api/me/profile` | `{ displayName, bio, avatarUri, handle, xp, level }` |
+| GET / PATCH | `/api/me/profile` | `{ displayName, bio, avatarUri, handle }`. `xp` and `level` are read-only (see below). |
 | PUT | `/api/me/top-ten` | `{ movieIds }`, up to 10, #1 first |
 | PUT | `/api/me/pinned-collections` | `{ collectionIds }`, up to 3 |
 | GET / PATCH | `/api/me/settings` | `{ language, theme, preferences (merged), hasCompletedOnboarding, tipsSeen (merged), resetTips }` |
@@ -137,6 +137,22 @@ Until these are set, the buttons explain what's missing, and the server answers 
 
 `watched`, `tier` and `watchlist` events are recorded automatically. Badges and completed collections are worked out on the device, so the app posts them. Re-tiering the same movie within an hour updates the earlier event instead of adding a new one.
 
+**Cleanup:** the feed keeps the last 90 days and at most each person's newest 200 events. Older ones are deleted when the server starts and every 6 hours after (`pruneActivity` in `src/lib/activity.js`).
+
+### XP and level
+
+The server works these out from the watch history (`src/lib/xp.js`) and stores them on the account, so the level friends see can't be faked:
+- **When it updates:** after every change to a watch history, and for everyone when the server starts.
+- **What's ignored:** `xp` and `level` sent to `PATCH /api/me/profile`.
+- **Same rules as the app:** they match the app's `src/utils/xp.js` exactly, so its instant display agrees with the server. Change both together.
+
+The rules:
+- 100 XP per movie watched
+- 50 per genre and 50 per decade
+- 75 per director you've seen 3+ films by
+- 200 per finished franchise / director / actor collection of 3+ films
+- 10 per rated movie
+
 ## The app and this server
 
 The ReelBoard app requires an account and treats this server as the source of truth. It uses TanStack Query to cache the account on the device (see the app's `src/services/queryClient.js`):
@@ -159,7 +175,6 @@ If a phone can't connect, allow port 4000 through the Windows firewall for Node.
 ## Not included yet
 
 - **Avatar upload:** `avatarUri` is stored as given. A local `file://` URI from the image picker won't show for friends until uploads are added.
-- **XP and level are reported by the app:** the server doesn't recompute them.
 - **Session token storage:** the token is in AsyncStorage. Switch it to `expo-secure-store` for encrypted storage (this needs a new dev build).
 - **HTTPS:** release builds of the app need an HTTPS server URL. Android blocks plain HTTP outside development.
 - **No rate limiting on `/api/auth`:** add it (e.g. `express-rate-limit`) before going public.

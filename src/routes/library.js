@@ -13,6 +13,7 @@ import {
 } from "../lib/library.js";
 import { assertMovie, generateRecommendations } from "../lib/movies.js";
 import { collectionId, movieId, tier, timestamp } from "../lib/schemas.js";
+import { updateLevel } from "../lib/xp.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/me — the app's movieStore, server-side.
@@ -113,6 +114,7 @@ router.post("/watched", validate(markWatchedSchema), (req, res) => {
     );
     logActivity(req.userId, "watched", { movieId: id });
     if (chosenTier) logActivity(req.userId, "tier", { movieId: id, tier: chosenTier });
+    updateLevel(req.userId);
     return completeChallengeFor(req.userId, id);
   });
 
@@ -143,6 +145,8 @@ router.patch(
         ]);
         if (newTier) logActivity(req.userId, "tier", { movieId: id, tier: newTier });
         else retractActivity(req.userId, "tier", id);
+        // Rating (or un-rating) changes XP.
+        updateLevel(req.userId);
       }
       if (watchedAt !== undefined) {
         run("UPDATE watched SET watched_at = ? WHERE user_id = ? AND movie_id = ?", [
@@ -174,12 +178,16 @@ router.delete("/watched/:movieId", validate(movieParam, "params"), (req, res) =>
     retractActivity(req.userId, "watched", id);
     retractActivity(req.userId, "tier", id);
     run("DELETE FROM watched WHERE user_id = ? AND movie_id = ?", [req.userId, id]);
+    updateLevel(req.userId);
   });
   res.status(204).end();
 });
 
 router.delete("/watched", (req, res) => {
-  run("DELETE FROM watched WHERE user_id = ?", [req.userId]);
+  transaction(() => {
+    run("DELETE FROM watched WHERE user_id = ?", [req.userId]);
+    updateLevel(req.userId);
+  });
   res.status(204).end();
 });
 

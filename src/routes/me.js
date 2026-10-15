@@ -25,6 +25,7 @@ import {
   uniqueIds,
 } from "../lib/schemas.js";
 import { getUserRow, toProfile } from "../lib/users.js";
+import { updateLevel } from "../lib/xp.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/me.
@@ -48,10 +49,9 @@ const profileSchema = z
     // A URL, or the app's local file:// URI until avatar upload exists.
     avatarUri: z.string().trim().max(2000).nullable(),
     handle,
-    // Computed by the app from the watch history (utils/xp.js) and reported
-    // here so friends see the right level.
-    xp: z.number().int().min(0),
-    level: z.number().int().min(1).max(999),
+    // XP and level aren't accepted: the server works them out from the
+    // watch history (lib/xp.js). Older apps still send them; they're
+    // dropped like any other unknown field.
   })
   .partial();
 
@@ -60,8 +60,6 @@ const PROFILE_COLUMNS = {
   bio: "bio",
   avatarUri: "avatar_uri",
   handle: "handle",
-  xp: "xp",
-  level: "level",
 };
 
 router.patch("/profile", validate(profileSchema), (req, res) => {
@@ -317,6 +315,7 @@ router.post("/import", validate(importSchema), (req, res) => {
           ],
         );
       }
+      updateLevel(me);
     }
     if (movies && "pickedMovie" in movies) {
       const picked = movies.pickedMovie && known(movies.pickedMovie) ? movies.pickedMovie : null;

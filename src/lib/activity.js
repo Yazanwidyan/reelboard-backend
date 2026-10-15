@@ -68,3 +68,31 @@ export const listActivity = (userIds, { before, limit }) => {
     [...userIds, before ?? Number.MAX_SAFE_INTEGER, limit],
   ).map(toEvent);
 };
+
+// ---- Cleanup ---------------------------------------------------------------
+//
+// The feed only ever shows recent events, so old ones are deleted rather
+// than kept forever: anything older than ACTIVITY_MAX_AGE_MS, and beyond
+// each person's newest ACTIVITY_PER_USER. Runs on start-up and then every
+// few hours (see server.js).
+
+export const ACTIVITY_MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
+export const ACTIVITY_PER_USER = 200;
+
+export const pruneActivity = ({
+  now = Date.now(),
+  maxAgeMs = ACTIVITY_MAX_AGE_MS,
+  perUser = ACTIVITY_PER_USER,
+} = {}) => {
+  const old = run("DELETE FROM activity WHERE created_at < ?", [now - maxAgeMs]).changes;
+  const extra = run(
+    `DELETE FROM activity WHERE id IN (
+       SELECT id FROM (
+         SELECT id, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY created_at DESC) AS position
+         FROM activity
+       ) WHERE position > ?
+     )`,
+    [perUser],
+  ).changes;
+  return Number(old) + Number(extra);
+};

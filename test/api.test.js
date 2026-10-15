@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { createApp } from "../src/app.js";
-import { closeDatabase, openDatabase } from "../src/db/index.js";
+import { all, closeDatabase, openDatabase, run } from "../src/db/index.js";
+import { pruneActivity } from "../src/lib/activity.js";
 import { verifiers } from "../src/lib/social.js";
 
 let server;
@@ -335,7 +336,9 @@ describe("library", () => {
 
     r = await api("PATCH", "/me/profile", { token, body: { bio: "Film nerd", level: 4, xp: 2400 } });
     assert.equal(r.body.profile.bio, "Film nerd");
-    assert.equal(r.body.profile.level, 4);
+    // Level and XP come from the watch history, not from the app.
+    assert.notEqual(r.body.profile.xp, 2400);
+    assert.equal(r.body.profile.level, 1);
 
     r = await api("PATCH", "/me/settings", {
       token,
@@ -364,6 +367,81 @@ describe("library", () => {
     assert.deepEqual(taste.body.aspects, { m5: ["the twist"] });
     assert.equal(taste.body.passes[0].movieId, "m9");
     assert.equal((await api("PUT", "/me/taste/leanings", { token, body: { leanings: [2] } })).status, 400);
+  });
+});
+
+describe("xp and level", () => {
+  test("worked out by the server from the watch history; app-sent values are ignored", async () => {
+    const { token } = await register("Xp User", "xpuser");
+    const profile = async () => (await api("GET", "/me/profile", { token })).body.profile;
+    assert.equal((await profile()).xp, 0);
+
+    // m30 The Godfather (1972, Crime/Drama): 100 + genres 2×50 + decade 50.
+    await api("POST", "/me/watched", { token, body: { movieId: "m30" } });
+    let p = await profile();
+    assert.equal(p.xp, 100 + 2 * 50 + 50);
+    assert.equal(p.level, 1);
+
+    // Rating it adds 10; un-rating takes it away again.
+    await api("PATCH", "/me/watched/m30", { token, body: { tier: "S" } });
+    assert.equal((await profile()).xp, 260);
+    await api("PATCH", "/me/watched/m30", { token, body: { tier: null } });
+    assert.equal((await profile()).xp, 250);
+
+    // A modified app claiming a huge level changes nothing.
+    const faked = await api("PATCH", "/me/profile", { token, body: { xp: 999999, level: 99, bio: "hi" } });
+    assert.equal(faked.status, 200);
+    assert.equal(faked.body.profile.xp, 250);
+    assert.equal(faked.body.profile.level, 1);
+    assert.equal(faked.body.profile.bio, "hi");
+
+    // The Godfather trilogy-ish: 3 Coppola films → director bonus (75).
+    await api("POST", "/me/watched", { token, body: { movieId: "m31" } });
+    await api("POST", "/me/watched", { token, body: { movieId: "m34" } });
+    p = await profile();
+    assert.ok(p.xp >= 3 * 100 + 75, `expected the director bonus, got ${p.xp}`);
+    assert.equal(p.level, p.xp >= 800 ? 2 : 1);
+
+    await api("DELETE", "/me/watched", { token });
+    assert.equal((await profile()).xp, 0);
+  });
+
+  test("friends see the server's level", async () => {
+    const a = await register("Level A", "levela");
+    const b = await register("Level B", "levelb");
+    for (const movieId of ["m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8"]) {
+      await api("POST", "/me/watched", { token: a.token, body: { movieId, tier: "A" } });
+    }
+    await api("PATCH", "/me/profile", { token: a.token, body: { level: 1 } });
+    await api("POST", "/friends/requests", { token: b.token, body: { userId: a.user.id } });
+    await api("POST", `/friends/requests/${b.user.id}/accept`, { token: a.token });
+    const friend = (await api("GET", "/friends", { token: b.token })).body.friends[0];
+    const own = (await api("GET", "/me/profile", { token: a.token })).body.profile;
+    assert.ok(own.level > 1);
+    assert.equal(friend.level, own.level);
+  });
+});
+
+describe("activity cleanup", () => {
+  test("drops events past 90 days and beyond each person's newest 200", async () => {
+    const { user } = await register("Busy Watcher", "busywatcher");
+    const day = 24 * 60 * 60 * 1000;
+    const now = Date.now();
+    const insert = (id, createdAt) =>
+      run("INSERT INTO activity (id, user_id, type, data, created_at) VALUES (?, ?, 'badge', '{}', ?)", [
+        id,
+        user.id,
+        createdAt,
+      ]);
+    insert("a_ancient", now - 120 * day);
+    for (let i = 0; i < 205; i += 1) insert(`a_recent_${i}`, now - i * 1000);
+
+    const removed = pruneActivity({ now });
+    assert.equal(removed, 1 + 5);
+    const left = all("SELECT id FROM activity WHERE user_id = ? ORDER BY created_at DESC", [user.id]);
+    assert.equal(left.length, 200);
+    assert.equal(left[0].id, "a_recent_0");
+    assert.ok(!left.some((row) => row.id === "a_ancient" || row.id === "a_recent_204"));
   });
 });
 
