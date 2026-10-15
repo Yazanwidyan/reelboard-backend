@@ -1,4 +1,5 @@
 import { all, fromJSON, get, run } from "../db/index.js";
+import { moviesOutsidePool } from "./movies.js";
 import { toProfile, getUserRow } from "./users.js";
 
 // Serializers and reads for a user's own data, in the same shapes the app's
@@ -112,22 +113,47 @@ export const getTaste = (userId) => ({
   leanings: fromJSON(getUserState(userId).leanings),
 });
 
+// The library part of the state (GET /api/me/library).
+export const getLibrary = (userId, state = getUserState(userId)) => ({
+  bucketList: listWatchlist(userId),
+  watched: listWatched(userId),
+  ...toPick(state),
+  unlockedCollections: fromJSON(state.unlocked_collections, []),
+});
+
+export const libraryMovieIds = (library) => [
+  ...library.bucketList.map((entry) => entry.movieId),
+  ...library.watched.map((entry) => entry.movieId),
+  library.pickedMovie,
+];
+
 // Everything the app keeps locally, in one response — what the app loads
-// on sign-in to hydrate its stores.
+// on sign-in to hydrate its stores. `movies`: the ones in it that aren't in
+// the pool (found with search, say), so the app can show them.
 export const getFullState = (userId) => {
   const state = getUserState(userId);
+  const profile = toProfile(getUserRow(userId));
+  const library = getLibrary(userId, state);
+  const boards = listBoards(userId);
+  const challenges = getChallenges(userId);
+  const taste = getTaste(userId);
   return {
-    profile: toProfile(getUserRow(userId)),
+    profile,
     settings: toSettings(state),
-    library: {
-      bucketList: listWatchlist(userId),
-      watched: listWatched(userId),
-      ...toPick(state),
-      unlockedCollections: fromJSON(state.unlocked_collections, []),
-    },
-    boards: listBoards(userId),
-    challenges: getChallenges(userId),
-    taste: getTaste(userId),
+    library,
+    boards,
+    challenges,
+    taste,
     recentSearches: fromJSON(state.recent_searches, []),
+    movies: moviesOutsidePool([
+      ...libraryMovieIds(library),
+      ...boards.flatMap((board) => board.movieIds),
+      ...profile.topTen,
+      ...[challenges.activeChallenge, ...challenges.history]
+        .filter(Boolean)
+        .map((challenge) => challenge.targetMovieId),
+      ...Object.keys(taste.aspects),
+      ...taste.passes.map((pass) => pass.movieId),
+    ]),
   };
 };

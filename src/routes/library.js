@@ -6,12 +6,14 @@ import { notFound } from "../lib/errors.js";
 import {
   completeChallengeFor,
   getUserState,
+  getLibrary,
   getWatchedEntry,
+  libraryMovieIds,
   listWatched,
   listWatchlist,
   toPick,
 } from "../lib/library.js";
-import { assertMovie, generateRecommendations } from "../lib/movies.js";
+import { ensureMovie, generateRecommendations, moviesOutsidePool } from "../lib/movies.js";
 import { collectionId, movieId, tier, timestamp } from "../lib/schemas.js";
 import { updateLevel } from "../lib/xp.js";
 import { validate } from "../middleware/validate.js";
@@ -24,13 +26,8 @@ const movieParam = z.object({ movieId });
 // GET /api/me/library — the whole movieStore in one response: watchlist,
 // watched, tonight's pick and manually unlocked collections.
 router.get("/library", (req, res) => {
-  const state = getUserState(req.userId);
-  res.json({
-    bucketList: listWatchlist(req.userId),
-    watched: listWatched(req.userId),
-    ...toPick(state),
-    unlockedCollections: fromJSON(state.unlocked_collections, []),
-  });
+  const library = getLibrary(req.userId);
+  res.json({ ...library, movies: moviesOutsidePool(libraryMovieIds(library)) });
 });
 
 // Deletes succeed even when there's nothing left to delete: the app may
@@ -43,9 +40,9 @@ router.get("/watchlist", (req, res) => {
   res.json({ watchlist: listWatchlist(req.userId) });
 });
 
-router.post("/watchlist", validate(z.object({ movieId })), (req, res) => {
+router.post("/watchlist", validate(z.object({ movieId })), async (req, res) => {
   const { movieId: id } = req.body;
-  assertMovie(id);
+  await ensureMovie(id);
   const existing = get("SELECT added_at FROM watchlist WHERE user_id = ? AND movie_id = ?", [
     req.userId,
     id,
@@ -94,9 +91,9 @@ const markWatchedSchema = z.object({
 // Marking something watched also takes it off the watchlist, clears it as
 // tonight's pick, and completes the active challenge if it was the target —
 // same as the app's toggleWatched + checkAutoCompletion.
-router.post("/watched", validate(markWatchedSchema), (req, res) => {
+router.post("/watched", validate(markWatchedSchema), async (req, res) => {
   const { movieId: id, tier: chosenTier = null, watchedAt } = req.body;
-  assertMovie(id);
+  await ensureMovie(id);
   const existing = getWatchedEntry(req.userId, id);
   if (existing) return res.json({ entry: existing, completedChallenge: null });
 
@@ -202,8 +199,8 @@ router.get("/pick", (req, res) => {
 router.put(
   "/pick",
   validate(z.object({ movieId, mood: z.string().trim().min(1).max(40).nullable().optional() })),
-  (req, res) => {
-    assertMovie(req.body.movieId);
+  async (req, res) => {
+    await ensureMovie(req.body.movieId);
     run("UPDATE user_state SET picked_movie_id = ?, pick_mood = ? WHERE user_id = ?", [
       req.body.movieId,
       req.body.mood ?? null,

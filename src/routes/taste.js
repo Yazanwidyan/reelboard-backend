@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { run, toJSON, transaction } from "../db/index.js";
 import { getTaste } from "../lib/library.js";
-import { assertMovie } from "../lib/movies.js";
+import { ensureMovie } from "../lib/movies.js";
 import { leanings, MAX_PASSES, movieId } from "../lib/schemas.js";
 import { validate } from "../middleware/validate.js";
 
@@ -27,9 +27,9 @@ router.put(
   "/aspects/:movieId",
   validate(z.object({ movieId }), "params"),
   validate(z.object({ aspects: z.array(z.string().trim().min(1).max(40)).max(20) })),
-  (req, res) => {
+  async (req, res) => {
     const { movieId: id } = req.params;
-    assertMovie(id);
+    await ensureMovie(id);
     const aspects = [...new Set(req.body.aspects)];
     if (aspects.length > 0) {
       run(
@@ -46,8 +46,8 @@ router.put(
 
 // A pass (swiped left / "not this one") — a weak negative signal. Keeps the
 // newest MAX_PASSES, like the app.
-router.post("/passes", validate(z.object({ movieId })), (req, res) => {
-  assertMovie(req.body.movieId);
+router.post("/passes", validate(z.object({ movieId })), async (req, res) => {
+  await ensureMovie(req.body.movieId);
   const at = Date.now();
   transaction(() => {
     run(

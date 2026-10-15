@@ -4,7 +4,7 @@ import { get, run, transaction } from "../db/index.js";
 import { conflict, forbidden, notFound } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { listBoards, toBoard } from "../lib/library.js";
-import { assertMovie } from "../lib/movies.js";
+import { ensureMovie, ensureMovies, moviesOutsidePool } from "../lib/movies.js";
 import { BOARD_NAME_MAX, boardId, movieId, uniqueIds } from "../lib/schemas.js";
 import { areFriends } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
@@ -42,7 +42,8 @@ const setMovies = (boardId, movieIds) => {
 };
 
 router.get("/", (req, res) => {
-  res.json({ boards: listBoards(req.userId) });
+  const boards = listBoards(req.userId);
+  res.json({ boards, movies: moviesOutsidePool(boards.flatMap((board) => board.movieIds)) });
 });
 
 // `id` is optional: the app sends its own board id so later edits can use
@@ -50,8 +51,8 @@ router.get("/", (req, res) => {
 router.post(
   "/",
   validate(z.object({ id: boardId.optional(), name, movieIds: uniqueIds(movieId, 1000).default([]) })),
-  (req, res) => {
-    req.body.movieIds.forEach(assertMovie);
+  async (req, res) => {
+    await ensureMovies(req.body.movieIds, { strict: true });
     const id = req.body.id ?? newId("b");
     const existing = get("SELECT * FROM boards WHERE id = ?", [id]);
     if (existing) {
@@ -100,9 +101,9 @@ router.put(
   "/:id/movies",
   validate(idParam, "params"),
   validate(z.object({ movieIds: uniqueIds(movieId, 1000) })),
-  (req, res) => {
+  async (req, res) => {
     loadBoard(req.params.id, req.userId, { write: true });
-    req.body.movieIds.forEach(assertMovie);
+    await ensureMovies(req.body.movieIds, { strict: true });
     transaction(() => {
       setMovies(req.params.id, req.body.movieIds);
       touch(req.params.id);
@@ -116,9 +117,9 @@ router.post(
   "/:id/movies",
   validate(idParam, "params"),
   validate(z.object({ movieId })),
-  (req, res) => {
+  async (req, res) => {
     loadBoard(req.params.id, req.userId, { write: true });
-    assertMovie(req.body.movieId);
+    await ensureMovie(req.body.movieId);
     transaction(() => {
       const { changes } = run(
         `INSERT OR IGNORE INTO board_movies (board_id, movie_id, position)

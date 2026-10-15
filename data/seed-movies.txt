@@ -1,6 +1,7 @@
-# Movies to add to the catalog — read by scripts/add-movies.js.
-# One per line: Title|Year|Franchise (franchise optional). Lines for movies
-# already in the catalog only set their franchise (no OMDb request).
+# Movies for the pool — read by scripts/build-pool.js (npm run build-pool).
+# One per line: Title|Year|Franchise|imdbId (franchise and IMDb id optional;
+# an IMDb id pins the exact film when the title is ambiguous). Movies already
+# in the pool only get their franchise set.
 # Lines starting with # are ignored.
 
 # ---- Franchises (tags existing movies too) --------------------------------

@@ -1,5 +1,5 @@
 import { all, run } from "../db/index.js";
-import { getAllMovies } from "./movies.js";
+import { getAllMovies, getMovieById } from "./movies.js";
 
 // XP and level, worked out on the server from the watch history, so the
 // numbers friends see can't be made up by a modified app. The rules are
@@ -65,9 +65,14 @@ export const decadeOf = (year) => `${Math.floor(year / 10) * 10}s`;
 // A watched entry counts as rated with a tier — or an old star rating.
 const isRated = (entry) => entry.tier != null || entry.rating != null;
 
-// `watched`: [{ movieId, tier, rating }]. `catalog`: { byId, xpCollections }.
+// `watched`: [{ movieId, tier, rating }]. `catalog`: { byId, xpCollections,
+// lookup? } — `lookup` finds movies outside the pool (anything from TMDB
+// counts for movies, genres, decades and directors; collections are the
+// pool's).
 export const computeXP = (watched, catalog) => {
-  const movies = watched.map((entry) => catalog.byId.get(entry.movieId)).filter(Boolean);
+  const movies = watched
+    .map((entry) => catalog.byId.get(entry.movieId) ?? catalog.lookup?.(entry.movieId))
+    .filter(Boolean);
   const genres = new Set(movies.flatMap((movie) => movie.genres));
   const decades = new Set(movies.map((movie) => decadeOf(movie.year)));
   const directorCounts = new Map();
@@ -115,6 +120,7 @@ const getCatalog = () => {
     catalog = {
       byId: new Map(movies.map((movie) => [movie.id, movie])),
       xpCollections: buildXPCollections(movies),
+      lookup: getMovieById,
     };
   }
   return catalog;

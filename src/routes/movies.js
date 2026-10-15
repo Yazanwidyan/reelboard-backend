@@ -6,16 +6,46 @@ import { notFound } from "../lib/errors.js";
 import {
   applyPreferenceFilters,
   DECADE_RANGES,
+  ensureMovie,
+  ensureMovies,
   getAllMovies,
   getGenres,
   getMovieById,
   matchesSearch,
   RUNTIME_RANGES,
+  toLean,
 } from "../lib/movies.js";
-import { pagination } from "../lib/schemas.js";
+import { movieId, pagination } from "../lib/schemas.js";
+import { imageUrl, tmdbGet } from "../lib/tmdb.js";
+import { GENRE_IDS, franchiseOf, toSummary } from "../lib/tmdbMovies.js";
+import { requireAuth } from "../middleware/auth.js";
+import { rateLimit } from "../middleware/rateLimit.js";
 import { validate } from "../middleware/validate.js";
 
+// Mounted at /api/movies.
+//   The pool (public): GET /, /meta, /catalog, /reels — data/catalog.json.
+//   Everything on TMDB (signed in, rate-limited): search, lists, discover,
+//   any movie's page, similar movies, where to watch, collections.
 const router = Router();
+
+// TMDB answers stay fresh in the server's memory for this long.
+const HOUR = 60 * 60 * 1000;
+const tmdbRoute = [requireAuth, rateLimit({ windowMs: 60 * 1000, max: 120 })];
+// TMDB pages past 500 aren't served.
+const MAX_PAGE = 500;
+const tmdbPage = z.coerce.number().int().min(1).max(MAX_PAGE).default(1);
+const region = z
+  .string()
+  .regex(/^[A-Za-z]{2}$/)
+  .transform((value) => value.toUpperCase());
+
+// A page of TMDB movie results, as summaries.
+const toPage = (data, page) => ({
+  results: (data?.results ?? []).filter((movie) => !movie.adult).map(toSummary),
+  page,
+  totalPages: Math.min(data?.total_pages ?? 0, MAX_PAGE),
+  totalResults: data?.total_results ?? 0,
+});
 
 const SORTS = {
   rank: (a, b) => a.rank - b.rank,
@@ -102,7 +132,7 @@ let catalogResponse = null;
 const getCatalogResponse = () => {
   if (!catalogResponse) {
     const body = JSON.stringify({
-      movies: getAllMovies(),
+      movies: getAllMovies().map(toLean),
       reelClips: listClips(),
       clipSeconds: catalogMeta.clipSeconds,
       dimensions: catalogMeta.dimensions,
@@ -139,10 +169,204 @@ router.get("/reels", (req, res) => {
   res.json({ clips, clipSeconds: catalogMeta.clipSeconds });
 });
 
-router.get("/:id", (req, res) => {
-  const movie = getMovieById(req.params.id);
-  if (!movie) throw notFound("No such movie");
+// ---- Everything on TMDB --------------------------------------------------------
+
+// GET /api/movies/search?q=matrix&page=1 — any movie, by title.
+router.get(
+  "/search",
+  tmdbRoute,
+  validate(
+    z.object({
+      q: z.string().trim().min(1).max(100),
+      page: tmdbPage,
+      year: z.coerce.number().int().min(1870).max(2100).optional(),
+    }),
+    "query",
+  ),
+  async (req, res) => {
+    const { q, page, year } = req.validQuery;
+    const data = await tmdbGet(
+      "/search/movie",
+      { query: q, page, primary_release_year: year, include_adult: "false", language: "en-US" },
+      { ttl: 10 * 60 * 1000 },
+    );
+    res.json(toPage(data, page));
+  },
+);
+
+// GET /api/movies/lists/:kind — TMDB's lists. `region` (two letters) for
+// what's in cinemas there.
+const LISTS = {
+  trending: "/trending/movie/week",
+  popular: "/movie/popular",
+  "now-playing": "/movie/now_playing",
+  upcoming: "/movie/upcoming",
+  "top-rated": "/movie/top_rated",
+};
+router.get(
+  "/lists/:kind",
+  tmdbRoute,
+  validate(z.object({ kind: z.enum(Object.keys(LISTS)) }), "params"),
+  validate(z.object({ page: tmdbPage, region: region.optional() }), "query"),
+  async (req, res) => {
+    const { page, region: country } = req.validQuery;
+    const data = await tmdbGet(
+      LISTS[req.params.kind],
+      { page, region: country, language: "en-US" },
+      { ttl: HOUR },
+    );
+    res.json(toPage(data, page));
+  },
+);
+
+// GET /api/movies/discover — browse by genre, decade and rating, sorted by
+// popularity, rating or release date.
+const DISCOVER_SORTS = {
+  popular: { sort_by: "popularity.desc" },
+  rating: { sort_by: "vote_average.desc", "vote_count.gte": 300 },
+  newest: { sort_by: "primary_release_date.desc", "vote_count.gte": 20 },
+};
+router.get(
+  "/discover",
+  tmdbRoute,
+  validate(
+    z.object({
+      genre: z.enum(Object.keys(GENRE_IDS)).optional(),
+      decade: z.enum(Object.keys(DECADE_RANGES)).optional(),
+      minRating: z.coerce.number().min(0).max(10).optional(),
+      sort: z.enum(Object.keys(DISCOVER_SORTS)).default("popular"),
+      page: tmdbPage,
+    }),
+    "query",
+  ),
+  async (req, res) => {
+    const { genre, decade, minRating, sort, page } = req.validQuery;
+    const range = DECADE_RANGES[decade ?? "Any"];
+    const today = new Date().toISOString().slice(0, 10);
+    const data = await tmdbGet(
+      "/discover/movie",
+      {
+        ...DISCOVER_SORTS[sort],
+        with_genres: genre ? GENRE_IDS[genre] : undefined,
+        "primary_release_date.gte": range ? `${Math.max(range[0], 1870)}-01-01` : undefined,
+        "primary_release_date.lte": range
+          ? `${Math.min(range[1], 2100)}-12-31`
+          : sort === "newest"
+            ? today
+            : undefined,
+        "vote_average.gte": minRating,
+        // Feature films: no shorts or music videos.
+        "with_runtime.gte": 40,
+        include_adult: "false",
+        page,
+        language: "en-US",
+      },
+      { ttl: HOUR },
+    );
+    res.json(toPage(data, page));
+  },
+);
+
+// GET /api/movies/batch?ids=603,550 — several movies at once (up to 50),
+// from TMDB if the server doesn't have them yet. Unknown ids are left out.
+router.get(
+  "/batch",
+  tmdbRoute,
+  validate(
+    z.object({
+      ids: z
+        .string()
+        .transform((value) => [...new Set(value.split(",").map((id) => id.trim()).filter(Boolean))])
+        .pipe(z.array(movieId).min(1).max(50)),
+    }),
+    "query",
+  ),
+  async (req, res) => {
+    res.json({ movies: (await ensureMovies(req.validQuery.ids)).map(toLean) });
+  },
+);
+
+// GET /api/movies/collections/:id — a TMDB collection ("The Dark Knight
+// Collection"): every film in it, oldest first.
+router.get(
+  "/collections/:id",
+  tmdbRoute,
+  validate(z.object({ id: z.string().regex(/^\d{1,10}$/) }), "params"),
+  async (req, res) => {
+    const data = await tmdbGet(
+      `/collection/${req.params.id}`,
+      { language: "en-US" },
+      { ttl: 24 * HOUR },
+    );
+    if (!data) throw notFound("No such collection");
+    res.json({
+      collection: {
+        id: data.id,
+        name: data.name,
+        franchise: franchiseOf(data),
+        overview: data.overview || "",
+        poster: imageUrl(data.poster_path, "w500"),
+        backdrop: imageUrl(data.backdrop_path, "w1280"),
+        movies: (data.parts ?? [])
+          .filter((movie) => !movie.adult)
+          .sort((a, b) => (a.release_date || "9999").localeCompare(b.release_date || "9999"))
+          .map(toSummary),
+      },
+    });
+  },
+);
+
+const idParam = validate(z.object({ id: movieId }), "params");
+
+// GET /api/movies/:id — any movie's page: everything, including cast with
+// photos, directors and writers.
+router.get("/:id", tmdbRoute, idParam, async (req, res) => {
+  const { fetchedAt, ...movie } = await ensureMovie(req.params.id);
   res.json({ movie });
 });
+
+// GET /api/movies/:id/similar — TMDB's recommendations for it (or, without
+// any, its similar movies).
+router.get("/:id/similar", tmdbRoute, idParam, async (req, res) => {
+  const options = [{ language: "en-US" }, { ttl: 24 * HOUR }];
+  const recommended = await tmdbGet(`/movie/${req.params.id}/recommendations`, ...options);
+  const data = recommended?.results?.length
+    ? recommended
+    : await tmdbGet(`/movie/${req.params.id}/similar`, ...options);
+  res.json(toPage(data, 1));
+});
+
+// GET /api/movies/:id/providers?region=US — where to watch it there:
+// stream / rent / buy / free. The data is JustWatch's (via TMDB), and its
+// terms ask for JustWatch to be credited wherever it's shown.
+const PROVIDER_KINDS = { flatrate: "stream", free: "free", ads: "ads", rent: "rent", buy: "buy" };
+router.get(
+  "/:id/providers",
+  tmdbRoute,
+  idParam,
+  validate(z.object({ region: region.default("US") }), "query"),
+  async (req, res) => {
+    const data = await tmdbGet(`/movie/${req.params.id}/watch/providers`, {}, { ttl: 6 * HOUR });
+    const here = data?.results?.[req.validQuery.region] ?? null;
+    const providers = Object.fromEntries(
+      Object.entries(PROVIDER_KINDS).map(([kind, name]) => [
+        name,
+        [...(here?.[kind] ?? [])]
+          .sort((a, b) => a.display_priority - b.display_priority)
+          .map((provider) => ({
+            id: provider.provider_id,
+            name: provider.provider_name,
+            logo: imageUrl(provider.logo_path, "w92"),
+          })),
+      ]),
+    );
+    res.json({
+      region: req.validQuery.region,
+      link: here?.link ?? null,
+      ...providers,
+      source: "JustWatch",
+    });
+  },
+);
 
 export default router;

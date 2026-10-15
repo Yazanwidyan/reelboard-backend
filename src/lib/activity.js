@@ -55,17 +55,19 @@ const toEvent = (row) => ({
 });
 
 // Newest first; pass the last event's timestamp as `before` for the next page.
-export const listActivity = (userIds, { before, limit }) => {
-  if (userIds.length === 0) return [];
-  const placeholders = userIds.map(() => "?").join(", ");
+// `movieIds` limits it to events about those movies (a club's feed).
+export const listActivity = (userIds, { before, limit, movieIds }) => {
+  if (userIds.length === 0 || movieIds?.length === 0) return [];
+  const list = (ids) => ids.map(() => "?").join(", ");
+  const movieFilter = movieIds ? `AND activity.movie_id IN (${list(movieIds)})` : "";
   return all(
     `SELECT activity.*, users.display_name, users.handle, users.color, users.level,
             users.avatar_uri, users.bio
      FROM activity JOIN users ON users.id = activity.user_id
-     WHERE activity.user_id IN (${placeholders}) AND activity.created_at < ?
+     WHERE activity.user_id IN (${list(userIds)}) ${movieFilter} AND activity.created_at < ?
      ORDER BY activity.created_at DESC
      LIMIT ?`,
-    [...userIds, before ?? Number.MAX_SAFE_INTEGER, limit],
+    [...userIds, ...(movieIds ?? []), before ?? Number.MAX_SAFE_INTEGER, limit],
   ).map(toEvent);
 };
 

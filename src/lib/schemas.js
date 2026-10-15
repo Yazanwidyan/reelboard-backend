@@ -12,7 +12,8 @@ export const BIO_MAX = 140;
 export const MAX_RECENT_SEARCHES = 8;
 export const MAX_PASSES = 300;
 
-export const movieId = z.string().regex(/^m\d+$/, "Expected a movie id like m42");
+// A TMDB movie id, as a string ("603" is The Matrix).
+export const movieId = z.string().regex(/^\d{1,10}$/, "Expected a TMDB movie id like 603");
 export const tier = z.enum(TIERS);
 export const timestamp = z.number().int().nonnegative();
 // Board ids are made by the app (boardStore), so the server keeps them as-is.

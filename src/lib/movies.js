@@ -1,11 +1,23 @@
-import { all, fromJSON } from "../db/index.js";
-import { badRequest } from "./errors.js";
+import { all, catalogMeta, fromJSON, get, upsertMovie } from "../db/index.js";
+import { HttpError, notFound } from "./errors.js";
+import { tmdbGet } from "./tmdb.js";
+import { toMovie, trainVibes } from "./tmdbMovies.js";
 
-// The catalog is small (250 movies) and read-only at runtime, so it's held
-// in memory once loaded and filtered in JS with the same rules the app uses
-// (src/utils/movieFilters.js) — results match what the app shows offline.
+// Movies, by TMDB id. Two kinds:
+//   the pool   data/catalog.json — curated, with hand-tuned or estimated
+//              vibes. Small and read-only while the server runs, so it's held
+//              in memory and filtered in JS with the app's own rules
+//              (src/utils/movieFilters.js). Swipe, recommendations, the
+//              catalog the app downloads and collections use only these.
+//   the rest   any other TMDB movie, fetched the first time someone opens or
+//              saves it (ensureMovie) and kept in the movies table, refreshed
+//              when it's older than a week.
 
-let cache = null;
+const REFRESH_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
+const MOVIE_ID = /^\d{1,10}$/;
+
+let pool = null; // { list, byId }
+const others = new Map(); // non-pool movies read from the table, by id
 
 const rowToMovie = (row) => ({
   id: row.id,
@@ -23,26 +35,109 @@ const rowToMovie = (row) => ({
   poster: row.poster,
   backdrop: row.backdrop,
   vibe: fromJSON(row.vibe),
+  vibeSource: row.vibe_source,
+  inPool: row.in_pool === 1,
+  fetchedAt: row.fetched_at,
 });
 
+// The pool, in rank order.
 export const getAllMovies = () => {
-  if (!cache) {
-    const movies = all("SELECT * FROM movies ORDER BY rank").map(rowToMovie);
-    cache = { list: movies, byId: new Map(movies.map((movie) => [movie.id, movie])) };
+  if (!pool) {
+    const movies = all("SELECT * FROM movies WHERE in_pool = 1 ORDER BY rank").map(rowToMovie);
+    pool = { list: movies, byId: new Map(movies.map((movie) => [movie.id, movie])) };
+    // New movies' vibes are estimated from the pool's hand-tagged ones.
+    trainVibes(catalogMeta.handTagged, catalogMeta.themes);
   }
-  return cache.list;
+  return pool.list;
 };
 
+export const isPoolMovie = (id) => {
+  getAllMovies();
+  return pool.byId.has(id);
+};
+
+// Any movie the server already has (pool or not), or null. Never asks TMDB.
 export const getMovieById = (id) => {
   getAllMovies();
-  return cache.byId.get(id) ?? null;
-};
-
-export const assertMovie = (movieId) => {
-  const movie = getMovieById(movieId);
-  if (!movie) throw badRequest(`Unknown movie id "${movieId}"`);
+  const inPool = pool.byId.get(id);
+  if (inPool) return inPool;
+  if (others.has(id)) return others.get(id);
+  const row = get("SELECT * FROM movies WHERE id = ?", [id]);
+  const movie = row ? rowToMovie(row) : null;
+  if (movie) others.set(id, movie);
   return movie;
 };
+
+// The movie, from TMDB if the server doesn't have it yet (or has an old
+// copy). Throws 404 for an id TMDB doesn't know; if TMDB can't be reached,
+// a copy the server already has will do.
+const fetching = new Map();
+export const ensureMovie = async (id) => {
+  if (!MOVIE_ID.test(String(id))) throw notFound(`No movie with id "${id}"`);
+  const known = getMovieById(id);
+  if (known && (known.inPool || Date.now() - known.fetchedAt < REFRESH_AFTER_MS)) return known;
+  if (fetching.has(id)) return fetching.get(id);
+  const task = (async () => {
+    try {
+      const record = await tmdbGet(`/movie/${id}`, {
+        append_to_response: "credits,videos,release_dates",
+        language: "en-US",
+      });
+      if (!record || record.adult) {
+        if (known) return known;
+        throw notFound(`No movie with id "${id}"`);
+      }
+      upsertMovie(toMovie(record));
+      others.delete(id);
+      return getMovieById(id);
+    } catch (error) {
+      if (known && error instanceof HttpError && error.status >= 500) return known;
+      throw error;
+    } finally {
+      fetching.delete(id);
+    }
+  })();
+  fetching.set(id, task);
+  return task;
+};
+
+// Several at once (a few at a time), in the order given. Unknown ids are
+// left out unless `strict`, which throws for the first one instead.
+export const ensureMovies = async (ids, { strict = false } = {}) => {
+  const unique = [...new Set(ids)];
+  const found = new Map();
+  for (let i = 0; i < unique.length; i += 8) {
+    const batch = unique.slice(i, i + 8);
+    const results = await Promise.allSettled(batch.map((id) => ensureMovie(id)));
+    results.forEach((result, j) => {
+      if (result.status === "fulfilled") found.set(batch[j], result.value);
+      else if (strict || !(result.reason instanceof HttpError && result.reason.status === 404)) {
+        throw result.reason;
+      }
+    });
+  }
+  return ids.map((id) => found.get(id)).filter(Boolean);
+};
+
+// A movie as lists and the catalog carry it: everything but the movie
+// page's extras (cast photos, crew), which GET /api/movies/:id sends.
+const PAGE_ONLY = ["castDetails", "directors", "writers", "budget", "revenue"];
+export const toLean = ({ inPool, fetchedAt, vibeSource, ...movie }) => ({
+  ...movie,
+  details: movie.details
+    ? Object.fromEntries(Object.entries(movie.details).filter(([key]) => !PAGE_ONLY.includes(key)))
+    : null,
+});
+
+// The movies behind a list of ids that aren't in the pool — what a response
+// sends alongside ids, since the app only has the pool. Only movies the
+// server has; never asks TMDB.
+export const moviesOutsidePool = (ids) =>
+  [...new Set(ids)]
+    .filter((id) => id && !isPoolMovie(id))
+    .map(getMovieById)
+    .filter(Boolean)
+    .map(toLean);
 
 export const getGenres = () =>
   [...new Set(getAllMovies().flatMap((movie) => movie.genres))].sort();

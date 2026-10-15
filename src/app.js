@@ -10,11 +10,14 @@ import activityRoutes from "./routes/activity.js";
 import authRoutes from "./routes/auth.js";
 import boardRoutes from "./routes/boards.js";
 import challengeRoutes from "./routes/challenges.js";
+import clubRoutes from "./routes/clubs.js";
+import communityRoutes from "./routes/community.js";
 import { friendsRouter, usersRouter } from "./routes/friends.js";
 import libraryRoutes from "./routes/library.js";
 import meRoutes from "./routes/me.js";
 import movieNightRoutes from "./routes/movieNights.js";
 import movieRoutes from "./routes/movies.js";
+import peopleRoutes from "./routes/people.js";
 import pushRoutes from "./routes/push.js";
 import tasteRoutes from "./routes/taste.js";
 
@@ -53,6 +56,9 @@ export const createApp = () => {
   app.use("/api/users", signedIn, usersRouter);
   app.use("/api/friends", signedIn, friendsRouter);
   app.use("/api/activity", signedIn, activityRoutes);
+  app.use("/api/community", signedIn, communityRoutes);
+  app.use("/api/clubs", signedIn, clubRoutes);
+  app.use("/api/people", signedIn, peopleRoutes);
   app.use("/api/movie-nights", signedIn, movieNightRoutes);
 
   app.use(notFoundHandler);

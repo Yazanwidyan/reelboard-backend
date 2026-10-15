@@ -4,7 +4,7 @@ import { z } from "zod";
 import { all, fromJSON, get, run, toJSON, transaction } from "../db/index.js";
 import { badRequest, conflict, forbidden, notFound } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
-import { assertMovie } from "../lib/movies.js";
+import { ensureMovies } from "../lib/movies.js";
 import { notify } from "../lib/push.js";
 import { movieId, uniqueIds } from "../lib/schemas.js";
 import { getUserRow, toPublicUser } from "../lib/users.js";
@@ -114,8 +114,8 @@ router.post(
       ),
     }),
   ),
-  (req, res) => {
-    req.body.movieIds.forEach(assertMovie);
+  async (req, res) => {
+    await ensureMovies(req.body.movieIds, { strict: true });
     const id = newId("n");
     const now = Date.now();
     transaction(() => {

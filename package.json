@@ -12,8 +12,7 @@
     "start": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env src/server.js",
     "dev": "node --disable-warning=ExperimentalWarning --env-file-if-exists=.env --watch src/server.js",
     "test": "node --disable-warning=ExperimentalWarning --test",
-    "enrich-omdb": "node --env-file-if-exists=.env scripts/enrich-omdb.js",
-    "add-movies": "node --env-file-if-exists=.env scripts/add-movies.js"
+    "build-pool": "node --env-file-if-exists=.env scripts/build-pool.js"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

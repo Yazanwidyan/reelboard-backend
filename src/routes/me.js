@@ -5,7 +5,7 @@ import { fromJSON, get, run, toJSON, transaction } from "../db/index.js";
 import { badRequest, conflict, unauthorized } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { getFullState, getUserState, toSettings } from "../lib/library.js";
-import { getMovieById } from "../lib/movies.js";
+import { ensureMovies, getMovieById } from "../lib/movies.js";
 import {
   BIO_MAX,
   BOARD_NAME_MAX,
@@ -82,8 +82,8 @@ router.patch("/profile", validate(profileSchema), (req, res) => {
 router.put(
   "/top-ten",
   validate(z.object({ movieIds: uniqueIds(movieId, TOP_TEN_SIZE) })),
-  (req, res) => {
-    const movieIds = req.body.movieIds.filter(getMovieById);
+  async (req, res) => {
+    const movieIds = (await ensureMovies(req.body.movieIds)).map((movie) => movie.id);
     run("UPDATE users SET top_ten = ? WHERE id = ?", [toJSON(movieIds), req.userId]);
     res.json({ topTen: movieIds });
   },

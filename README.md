@@ -1,6 +1,6 @@
 # ReelBoard Backend
 
-REST API for the [ReelBoard](../Reelboard) app. It handles accounts, the movie catalog, your library (watchlist, watched + tiers, tonight's pick), boards, challenges, taste signals, settings, friends and the activity feed.
+REST API for the [ReelBoard](../Reelboard) app. It handles accounts, movies (any movie on TMDB: search, pages, browsing, people), your library (watchlist, watched + tiers, tonight's pick), boards, challenges, taste signals, settings, friends, clubs and the activity feed.
 
 It's built with Node.js, Express 5 and SQLite (Node's built-in `node:sqlite`, so there's no database server to install), plus JWT auth and zod validation.
 
@@ -8,49 +8,48 @@ It's built with Node.js, Express 5 and SQLite (Node's built-in `node:sqlite`, so
 
 ```bash
 npm install
-cp .env.example .env      # then set JWT_SECRET
+cp .env.example .env      # then set JWT_SECRET and TMDB_READ_TOKEN
 npm run dev               # http://localhost:4000/api, restarts on changes
 npm test                  # end-to-end tests against an in-memory database
 ```
 
-The database file is created at `data/reelboard.db` on first start. The movie catalog in `data/catalog.json` is loaded into it on every start.
+The database file is created at `data/reelboard.db` on first start. The pool in `data/catalog.json` is loaded into it on every start.
 
-### The movie catalog
+**Upgrading from before TMDB:** a database from when movies had ids like `m42` can't be used any more, and the server says so at start-up. Stop the server, delete `data/reelboard.db` (and its `-wal` / `-shm` files) and start again. This deletes all accounts.
 
-`data/catalog.json` is the one place movies are maintained. The app ships no movie data: it loads the whole catalog from `GET /api/movies/catalog` at sign-in. The file holds:
+### Movies: TMDB and the pool
 
-- **`movies`:** each with `id`, `rank`, `title`, `year`, `rating`, `runtime`, `genres`, `director`, `cast`, `details`, `description`, `franchise`, `poster`, `backdrop`, and a `vibe` (`{ dims: [6 × 1–5], themes }`, the Taste DNA values).
-- **`reelClips`:** the YouTube trailer windows for Reels.
-- **`dimensions` and `themes`:** the Taste DNA vocabulary.
+Every movie comes from [TMDB](https://www.themoviedb.org), whose API terms allow apps to use its data and images. A movie's id is its TMDB id, as a string (`"603"` is The Matrix). Put your TMDB **API Read Access Token** in `.env` as `TMDB_READ_TOKEN` (or the API key as `TMDB_API_KEY`). It stays on the server; the app never sees it.
 
-To change it, edit the file and restart the server. Keep movie ids stable, because accounts refer to them.
+There are two kinds of movies:
 
-To refresh cast, details (critic scores, awards, box office…) and IMDb ratings from [OMDb](https://www.omdbapi.com), put `OMDB_API_KEY` in `.env`, then:
+- **The pool** (`data/catalog.json`): about 1,100 curated movies, each with a Taste DNA vibe (`{ dims: [6 × 1–5], themes }`). 250 were tuned by hand (`vibeSource: "hand"`); the rest are estimated by a model learnt from those. Swipe, Spin, recommendations, collections and the catalog the app downloads (`GET /api/movies/catalog`) use only the pool.
+- **Everything else on TMDB:** found with search or browsing. The server fetches a movie the first time someone opens or saves it, keeps it in the `movies` table with an estimated vibe, and refreshes it when it's more than a week old. Any movie can be watched, tiered, saved, put on a board or added to a club.
 
-```bash
-npm run enrich-omdb       # updates data/catalog.json; restart the server after
-```
+Responses that carry movie ids (`/me`, `/friends`, `/activity`, `/boards`, clubs, trending) also carry a `movies` list with the ones outside the pool, so the app can show them. The pool's movies it already has.
 
-**Adding movies.** The first 250 movies were tagged by hand. The rest come from `data/seed-movies.txt`, one per line as `Title|Year|Franchise|imdbId`. Franchise and IMDb id are optional; an IMDb id pins the exact film when a title is ambiguous (remakes, common titles). Then:
+**Building the pool:**
 
 ```bash
-npm run add-movies                # looks new seeds up on OMDb, adds them to data/catalog.json
-npm run add-movies -- --limit 50  # at most 50 lookups this run
-npm run add-movies -- --offline   # only uses data/omdb-cache.json, no requests
+npm run build-pool                 # refresh every pool movie from TMDB
+npm run build-pool -- --grow 500   # also add up to 500 of TMDB's most-voted movies
+npm run build-pool -- --offline    # re-apply data/tmdb-cache.json, no requests
 ```
 
-- **Quota:** OMDb's free key allows 1,000 requests a day. Answers are cached in `data/omdb-cache.json` (not committed), so when the quota runs out, run it again the next day and it carries on where it stopped.
-- **What gets skipped:** a lookup whose title or year doesn't match the seed, and anything without a poster or rating, under 40 minutes, or a documentary. Movies added earlier that no longer match their seed are removed again.
-- **Vibes:** added movies get an estimated Taste DNA vibe, learned from the 250 hand-tagged ones (`vibeSource: "estimated"`, against `"hand"`). Hand-tag the ones that matter most to make them exact.
-- **Rank:** added movies are ranked after the first 250 by IMDb's weighted rating, so a 9.0 with 40 votes doesn't outrank a 8.5 with a million.
+- **Kept from the curated catalog:** hand-tuned vibes, franchise tags, rank order and the Reels clips. Everything else (title, year, rating, runtime, genres, director, cast, plot, poster, backdrop, trailer, age rating) comes from TMDB.
+- **Seeds:** `data/seed-movies.txt` lists movies for the pool, one per line as `Title|Year|Franchise|imdbId`. Franchise and IMDb id are optional; an IMDb id pins the exact film when a title is ambiguous. Seeds not in the pool yet are added; seeds already in it get their franchise set. The script lists any seed TMDB can't find.
+- **Cache:** TMDB's answers are kept in `data/tmdb-cache.json` (not committed), so re-runs only ask about what's new.
+- **Afterwards:** restart the server. The app picks up the new catalog on its next start (its `ETag` changes).
 
-Restart the server after adding movies. The app picks up the new catalog on its next start (its `ETag` changes).
+**Ratings:** `rating` is TMDB's average vote (0–10), alongside ReelBoard's own community tiers. IMDb, Rotten Tomatoes and Metacritic scores aren't used, because they aren't licensed for an app like this.
+
+**Attribution:** TMDB's terms require crediting it wherever its data appears; the app's Settings screen does. "Where to watch" data is JustWatch's (through TMDB), and JustWatch must be credited wherever it's shown.
 
 ## Conventions
 
 - **Auth:** send `Authorization: Bearer <token>`. `register` and `login` return `{ token, user }`.
 - **Timestamps:** milliseconds since the epoch, the same as `Date.now()` in the app.
-- **Movie ids:** the catalog's ids (`m1`, `m2`, …). They never change or get reused, because accounts refer to them. Each movie's IMDb id is in `details.imdbId`.
+- **Movie ids:** TMDB ids, as strings (`"603"`). Each movie's IMDb id is in `details.imdbId`.
 - **Response shapes:** these match the app's Zustand stores. For example, a watched entry is `{ movieId, timestamp, tier, rating, watchCount }`, a board is `{ id, name, movieIds, createdAt, updatedAt }`, and a friend is `{ id, name, handle, color, level, watched: [{ movieId, tier }] }`. You can hydrate stores directly from responses.
 - **Errors:** `{ error: { message, details? } }`. Validation errors (400) list each bad field in `details`.
 - **Idempotency-Key:** any signed-in change (POST, PUT, PATCH, DELETE) can carry an `Idempotency-Key` header: 8–100 characters of `A–Z a–z 0–9 _ -`, unique per change. If the same key arrives again, the server sends back the first response (marked `Idempotent-Replayed: true`) without applying the change a second time. Using the key for a different request returns `409`. Keys are per account and kept for 7 days. The app sends one with every change, so re-sending after a lost reply or a restart is safe.
@@ -78,14 +77,34 @@ Setup:
 
 Until these are set, the buttons explain what's missing, and the server answers `503`.
 
-### Movies (public)
+### Movies
+The pool (public):
+
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/movies` | Query: `q`, `genres=Drama,Comedy` (matches any), `decade`, `runtime`, `minRating`, `director`, `ids=m1,m2`, `sort=rank\|rating\|year\|runtime\|title`, `order`, `page`, `limit` |
-| GET | `/api/movies/catalog` | the whole catalog in one response: every movie, the Reels clips, and the Taste DNA vocabulary. Sent with an `ETag`. Send it back as `If-None-Match` and, while the catalog is unchanged, the answer is an empty `304`. |
+| GET | `/api/movies` | Pool only. Query: `q`, `genres=Drama,Comedy` (matches any), `decade`, `runtime`, `minRating`, `director`, `ids=603,550`, `sort=rank\|rating\|year\|runtime\|title`, `order`, `page`, `limit` |
+| GET | `/api/movies/catalog` | The whole pool in one response: every movie (without the movie-page extras), the Reels clips, and the Taste DNA vocabulary. Sent with an `ETag`. Send it back as `If-None-Match` and, while the pool is unchanged, the answer is an empty `304`. |
 | GET | `/api/movies/meta` | genres, decades, runtimes, Taste DNA dimensions and themes |
 | GET | `/api/movies/reels` | trailer clips for the Reels feed |
-| GET | `/api/movies/:id` | one movie |
+
+Everything on TMDB (signed in, at most 120 requests a minute per account):
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/movies/search` | `?q=matrix&page=1&year=`. Any movie, by title. Results are summaries: `{ id, title, year, rating, votes, genres, poster, backdrop, description }`. |
+| GET | `/api/movies/lists/:kind` | `trending`, `popular`, `now-playing`, `upcoming`, `top-rated`. `?page`, and `region=GB` (two letters) for what's in cinemas there. |
+| GET | `/api/movies/discover` | `?genre=Sci-Fi&decade=1990s&minRating=7&sort=popular\|rating\|newest&page`. Feature films only (40+ minutes). |
+| GET | `/api/movies/batch` | `?ids=603,550` (up to 50). Several movies at once; unknown ids are left out. |
+| GET | `/api/movies/:id` | Any movie's page: the full movie, including `details.castDetails` (with photos and characters), `directors`, `writers`, `trailer`, `collection`, `rated`. Fetched from TMDB the first time. `inPool` says whether it's in the pool. |
+| GET | `/api/movies/:id/similar` | TMDB's recommendations for it (or its similar movies, without any). |
+| GET | `/api/movies/:id/providers` | `?region=US`. Where to watch it there: `{ stream, free, ads, rent, buy }` (each `[{ id, name, logo }]`), `link`, and `source: "JustWatch"`. |
+| GET | `/api/movies/collections/:id` | A TMDB collection ("The Dark Knight Collection"): `{ name, franchise, overview, poster, movies }`, oldest first. |
+
+### People (signed in)
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/people/search` | `?q=nolan`. `{ id, name, photo, knownFor, knownForTitles }`. |
+| GET | `/api/people/:id` | Biography, birthday, photo, and every movie: `acting` (with `character`), `directing`, `otherCrew` (with `jobs`). Newest first. |
 
 ### Me
 | Method | Path | Notes |
@@ -154,6 +173,32 @@ Until these are set, the buttons explain what's missing, and the server answers 
 
 **Cleanup:** the feed keeps the last 90 days and at most each person's newest 200 events. Older ones are deleted when the server starts and every 6 hours after (`pruneActivity` in `src/lib/activity.js`).
 
+### Community
+Totals across everyone on ReelBoard, never who tiered what. Signed in.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/community/movies/:movieId` | `{ watchedCount, watchlistCount, tieredCount, tiers: { S, A, B, C, D, F } }`. The movie page's "ReelBoard community" bars. |
+| GET | `/api/community/trending` | `?days=7&limit=20`. `trending`: most watched + saved in that window. `favorites`: highest share of S and A tiers, among movies with at least 2 tiers. Discover's top rows. |
+
+### Clubs
+A club is a group with a shared board, a "now watching" pick set by the owner, a club tier list (the average of members' tiers on the club's movies) and a feed. Clubs are private:
+- **Joining:** by invite code only. Clubs aren't listed or searchable, and anyone who isn't a member gets `404`.
+- **What members see:** each other's tiers, but only for the club's movies. The club feed only covers those movies too.
+- **Limits:** up to 20 clubs per person, 100 members per club, and 500 movies per board.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET / POST | `/api/clubs` | GET: your clubs (each with `movieIds`). POST `{ name (≤40), description? (≤200), movieIds? }` creates one; you're its owner. |
+| POST | `/api/clubs/join` | `{ code }` (any case). Already a member returns the club. |
+| GET / PATCH / DELETE | `/api/clubs/:id` | GET: the club in full (members, `movies` with each member's `watches`, `nowWatching`, `inviteCode`). PATCH (owner) `{ name?, description?, nowWatching? (movie id or null) }`. DELETE (owner) deletes it for everyone. |
+| POST | `/api/clubs/:id/leave` | Members only; the owner deletes the club instead. |
+| POST | `/api/clubs/:id/invite` | Owner: a new invite code. The old one stops working. |
+| DELETE | `/api/clubs/:id/members/:userId` | Owner removes a member. |
+| POST | `/api/clubs/:id/movies` | `{ movieId }`. Any member adds to the board. |
+| DELETE | `/api/clubs/:id/movies/:movieId` | Whoever added it, or the owner. |
+| GET | `/api/clubs/:id/activity` | `?before=<timestamp>&limit=30`. What members did with the club's movies. |
+
 ### Movie night on everyone's phones
 | Method | Path | Notes |
 |---|---|---|
@@ -218,4 +263,3 @@ If a phone can't connect, allow port 4000 through the Windows firewall for Node.
 - **Session token storage:** the token is in AsyncStorage. Switch it to `expo-secure-store` for encrypted storage (this needs a new dev build).
 - **HTTPS:** release builds of the app need an HTTPS server URL. Android blocks plain HTTP outside development.
 - **No rate limiting on `/api/auth`:** add it (e.g. `express-rate-limit`) before going public. `/api/movie-nights/join` should get the same, so codes can't be guessed.
-- **Where to watch:** needs a TMDB API key (free). OMDb doesn't have streaming availability.

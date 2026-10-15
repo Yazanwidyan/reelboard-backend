@@ -3,6 +3,7 @@ import { z } from "zod";
 import { all, fromJSON, get, run } from "../db/index.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
 import { listBoards } from "../lib/library.js";
+import { moviesOutsidePool } from "../lib/movies.js";
 import { notify } from "../lib/push.js";
 import { handle } from "../lib/schemas.js";
 import { areFriends, friendIdsOf, getUserRow, toPublicUser } from "../lib/users.js";
@@ -48,6 +49,12 @@ const toFriend = (row) => ({
   watched: tieredWatched(row.id),
 });
 
+// Friends' movies outside the pool, so the app can show them.
+const friendMovies = (friends) =>
+  moviesOutsidePool(
+    friends.flatMap((friend) => [...(friend.topTen ?? []), ...(friend.watched ?? []).map((entry) => entry.movieId)]),
+  );
+
 const userParam = z.object({ userId: z.string().min(1) });
 
 const loadUser = (userId) => {
@@ -83,7 +90,7 @@ usersRouter.get("/:userId", validate(userParam, "params"), (req, res) => {
     rel === "friends" || rel === "self"
       ? { ...toFriend(row), boardCount: listBoards(row.id).length }
       : toPublicUser(row);
-  res.json({ user: { ...user, relationship: rel } });
+  res.json({ user: { ...user, relationship: rel }, movies: friendMovies([user]) });
 });
 
 usersRouter.get("/:userId/boards", validate(userParam, "params"), (req, res) => {
@@ -101,7 +108,7 @@ friendsRouter.get("/", (req, res) => {
     .map(getUserRow)
     .map(toFriend)
     .sort((a, b) => a.name.localeCompare(b.name));
-  res.json({ friends });
+  res.json({ friends, movies: friendMovies(friends) });
 });
 
 friendsRouter.get("/requests", (req, res) => {

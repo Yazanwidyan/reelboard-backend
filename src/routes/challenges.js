@@ -3,7 +3,7 @@ import { z } from "zod";
 import { run, toJSON, transaction } from "../db/index.js";
 import { newId } from "../lib/ids.js";
 import { getChallenges } from "../lib/library.js";
-import { assertMovie } from "../lib/movies.js";
+import { ensureMovie } from "../lib/movies.js";
 import { challenge } from "../lib/schemas.js";
 import { validate } from "../middleware/validate.js";
 
@@ -19,9 +19,9 @@ router.get("/", (req, res) => {
 
 // Accept a challenge. Replaces any active one without counting it as skipped,
 // same as the app's acceptChallenge.
-router.post("/active", validate(z.object({ challenge })), (req, res) => {
+router.post("/active", validate(z.object({ challenge })), async (req, res) => {
   const accepted = req.body.challenge;
-  assertMovie(accepted.targetMovieId);
+  await ensureMovie(accepted.targetMovieId);
   transaction(() => {
     run("DELETE FROM challenges WHERE user_id = ? AND status = 'active'", [req.userId]);
     run(

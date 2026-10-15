@@ -2,23 +2,33 @@
 -- unit the app already stores, so values pass straight through.
 -- JSON columns hold arrays/objects serialized as text.
 
+-- Every movie the server knows, by TMDB id ("603" is The Matrix). The
+-- pool (in_pool = 1) is data/catalog.json, loaded on every start: the
+-- curated movies with hand-tuned or estimated vibes that Swipe, Spin,
+-- recommendations and collections draw from. Any other TMDB movie is added
+-- the first time someone opens or saves it, and refreshed when it's older
+-- than a week (lib/movies.js).
 CREATE TABLE IF NOT EXISTS movies (
-  id          TEXT PRIMARY KEY,         -- "m1".."m250", same ids as the app
-  rank        INTEGER NOT NULL,
+  id          TEXT PRIMARY KEY,
+  in_pool     INTEGER NOT NULL DEFAULT 0,
+  rank        INTEGER,                  -- pool order (pool only)
   title       TEXT NOT NULL,
-  year        INTEGER NOT NULL,
-  rating      REAL NOT NULL,
-  runtime     INTEGER NOT NULL,
+  year        INTEGER,
+  rating      REAL NOT NULL DEFAULT 0,  -- TMDB's average vote, 0–10
+  runtime     INTEGER,
   director    TEXT,
-  genres      TEXT NOT NULL,            -- JSON string[]
+  genres      TEXT NOT NULL,            -- JSON string[] (the app's 12 genres)
   "cast"      TEXT NOT NULL,            -- JSON string[]
   details     TEXT,                     -- JSON object | null
   description TEXT,
   franchise   TEXT,
   poster      TEXT,
   backdrop    TEXT,
-  vibe        TEXT NOT NULL             -- JSON { dims: number[6], themes: string[] }
+  vibe        TEXT NOT NULL,            -- JSON { dims: number[6], themes: string[] }
+  vibe_source TEXT NOT NULL DEFAULT 'estimated', -- 'hand' | 'estimated'
+  fetched_at  INTEGER NOT NULL DEFAULT 0
 );
+CREATE INDEX IF NOT EXISTS movies_pool ON movies (in_pool, rank);
 
 CREATE TABLE IF NOT EXISTS reel_clips (
   movie_id   TEXT PRIMARY KEY REFERENCES movies(id),
@@ -208,3 +218,35 @@ CREATE TABLE IF NOT EXISTS push_tokens (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS push_tokens_by_user ON push_tokens (user_id);
+
+-- Clubs: a group with a shared board, a "now watching" pick set by the
+-- owner, and a feed of what members do with the club's movies. Joined by
+-- invite code only — clubs aren't listed or searchable.
+CREATE TABLE IF NOT EXISTS clubs (
+  id                     TEXT PRIMARY KEY,
+  name                   TEXT NOT NULL,
+  description            TEXT NOT NULL DEFAULT '',
+  owner_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  invite_code            TEXT NOT NULL UNIQUE,
+  now_watching_movie_id  TEXT REFERENCES movies(id),
+  now_watching_set_at    INTEGER,
+  created_at             INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS club_members (
+  club_id   TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+  user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  role      TEXT NOT NULL CHECK (role IN ('owner','member')),
+  joined_at INTEGER NOT NULL,
+  PRIMARY KEY (club_id, user_id)
+);
+CREATE INDEX IF NOT EXISTS club_members_by_user ON club_members (user_id);
+
+-- The club's shared board, oldest first.
+CREATE TABLE IF NOT EXISTS club_movies (
+  club_id  TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
+  movie_id TEXT NOT NULL REFERENCES movies(id),
+  added_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+  added_at INTEGER NOT NULL,
+  PRIMARY KEY (club_id, movie_id)
+);
