@@ -350,6 +350,47 @@ describe("collections", () => {
     const inception = await api("GET", `/movies/${NOLAN.inception}`, { token });
     assert.ok(inception.body.collections.some((collection) => collection.id === "director-christopher-nolan"));
   });
+
+  test("a collection's page: its picture, cards with votes, and friends' progress", async () => {
+    const friend = await register("Nolan Friend", "nolanfriend");
+    const me = (await api("GET", "/me/profile", { token })).body.profile;
+    await api("POST", "/friends/requests", { token: friend.token, body: { userId: me.id } });
+    await api("POST", `/friends/requests/${friend.user.id}/accept`, { token });
+    await api("POST", "/me/watched", { token: friend.token, body: { movieId: NOLAN.memento, tier: "S" } });
+    await api("POST", "/me/watched", { token: friend.token, body: { movieId: NOLAN.prestige } });
+    await api("POST", "/me/watched", { token: friend.token, body: { movieId: "289" } }); // not Nolan's
+
+    const page = await api("GET", "/collections/director-christopher-nolan", { token });
+    assert.equal(page.status, 200);
+    assert.ok("art" in page.body, "art is there (null when TMDB has no picture)");
+    assert.ok(page.body.movies.every((movie) => typeof movie.votes === "number"));
+    assert.equal(page.body.friends.length, 1);
+    const [entry] = page.body.friends;
+    assert.equal(entry.user.id, friend.user.id);
+    assert.equal(entry.watchedCount, 2);
+    assert.deepEqual(entry.tiers, { [NOLAN.memento]: "S", [NOLAN.prestige]: null });
+
+    // Someone with no friends there sees none.
+    const loner = await register("Lone Viewer", "loneviewer");
+    assert.deepEqual((await api("GET", "/collections/director-christopher-nolan", { token: loner.token })).body.friends, []);
+
+    // A friend's profile: their finished collections (trophies), with the
+    // definitions to show them.
+    for (const movieId of ["155", "272", "49026"]) {
+      await api("POST", "/me/watched", { token: friend.token, body: { movieId } });
+    }
+    const profile = await api("GET", `/users/${friend.user.id}`, { token });
+    assert.ok(profile.body.user.finishedCollections.includes("franchise-the-dark-knight-trilogy"));
+    assert.deepEqual(profile.body.user.pinnedCollections, []);
+    assert.ok(profile.body.collections.some((collection) => collection.id === "franchise-the-dark-knight-trilogy"));
+    // A stranger gets just the public card.
+    const strangerView = await api("GET", `/users/${friend.user.id}`, { token: loner.token });
+    assert.equal(strangerView.body.user.finishedCollections, undefined);
+
+    // A franchise falls back to one of its films' backdrops.
+    const franchise = await api("GET", "/collections/franchise-the-dark-knight-trilogy", { token });
+    assert.ok(franchise.body.art?.backdrop?.startsWith("https://"));
+  });
 });
 
 describe("library", () => {

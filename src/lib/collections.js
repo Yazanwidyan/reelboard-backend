@@ -103,6 +103,25 @@ export const getCollection = (id) => collections().byId.get(id) ?? null;
 
 export const getCollectionsForMovie = (movieId) => collections().byMovie.get(movieId) ?? [];
 
+// Every franchise, director and actor collection (3+ films) these watched
+// movies finish — a profile's trophies.
+export const getFinishedCollections = (watchedIds) => {
+  const watched = new Set(watchedIds);
+  const found = new Map();
+  watched.forEach((movieId) =>
+    getCollectionsForMovie(movieId).forEach((collection) => {
+      if (
+        XP_COLLECTION_TYPES.includes(collection.type) &&
+        collection.movieIds.length >= XP_COLLECTION_MIN_SIZE &&
+        collection.movieIds.every((id) => watched.has(id))
+      ) {
+        found.set(collection.id, collection);
+      }
+    }),
+  );
+  return [...found.values()];
+};
+
 // The ones finishing earns XP for, as lists of movie ids.
 export const getXPCollections = () =>
   collections()
@@ -181,6 +200,8 @@ export const toCard = (movie) => ({
   franchise: movie.franchise,
   poster: movie.poster,
   rank: movie.rank,
+  // How many rated it on TMDB — the app weighs the rating by it.
+  votes: movie.details?.votes ?? 0,
   partial: true,
 });
 

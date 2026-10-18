@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { all, fromJSON, get, run } from "../db/index.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
+import { attachCollections, getFinishedCollections } from "../lib/collections.js";
 import { listBoards } from "../lib/library.js";
 import { moviesFor } from "../lib/movies.js";
 import { notify } from "../lib/push.js";
@@ -82,15 +83,27 @@ usersRouter.get(
   },
 );
 
-// Anyone's public card; friends (and you) also get their watch history.
+// Anyone's public card; friends (and you) also get their watch history,
+// and their trophies: `finishedCollections` (ids — the definitions come in
+// `collections`) and the ones they pinned to the front.
 usersRouter.get("/:userId", validate(userParam, "params"), (req, res) => {
   const row = loadUser(req.params.userId);
   const rel = relationship(req.userId, row.id);
-  const user =
-    rel === "friends" || rel === "self"
-      ? { ...toFriend(row), boardCount: listBoards(row.id).length }
-      : toPublicUser(row);
-  res.json({ user: { ...user, relationship: rel }, movies: friendMovies([user]) });
+  if (rel !== "friends" && rel !== "self") {
+    return res.json({ user: { ...toPublicUser(row), relationship: rel }, movies: [] });
+  }
+  const friend = toFriend(row);
+  const finished = getFinishedCollections(friend.watched.map((entry) => entry.movieId));
+  res.json({
+    user: {
+      ...friend,
+      boardCount: listBoards(row.id).length,
+      finishedCollections: finished.map((collection) => collection.id),
+      pinnedCollections: fromJSON(row.pinned_collections, []),
+      relationship: rel,
+    },
+    ...attachCollections(friendMovies([friend]), finished),
+  });
 });
 
 usersRouter.get("/:userId/boards", validate(userParam, "params"), (req, res) => {

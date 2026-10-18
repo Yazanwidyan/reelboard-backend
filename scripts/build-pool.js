@@ -29,7 +29,7 @@ import { fileURLToPath } from "node:url";
 import config from "../src/config.js";
 import { closeDatabase, openDatabase, writePool } from "../src/db/index.js";
 import { tmdbConfigured, tmdbGet } from "../src/lib/tmdb.js";
-import { toMovie, trainVibes } from "../src/lib/tmdbMovies.js";
+import { MOVIE_PARAMS, toMovie, trainVibes } from "../src/lib/tmdbMovies.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const CACHE = path.join(ROOT, "data", "tmdb-cache.json");
@@ -113,12 +113,10 @@ const findByTitle = async (title, year) => {
 // The full TMDB record for a movie, as the raw fields toMovie() reads.
 const fetchRecord = async (tmdbId) => {
   const key = `movie:${tmdbId}`;
-  if (key in cache) return cache[key];
-  if (OFFLINE) return undefined;
-  const record = await tmdbGet(`/movie/${tmdbId}`, {
-    append_to_response: "credits,videos,release_dates",
-    language: "en-US",
-  });
+  // Records cached before images were asked for are fetched again.
+  if (key in cache && (cache[key] === null || cache[key].images)) return cache[key];
+  if (OFFLINE) return cache[key];
+  const record = await tmdbGet(`/movie/${tmdbId}`, MOVIE_PARAMS);
   // Only what toMovie() reads, so the cache stays a sensible size.
   cache[key] = record && {
     ...Object.fromEntries(
@@ -137,6 +135,18 @@ const fetchRecord = async (tmdbId) => {
     release_dates: {
       results: (record.release_dates?.results ?? []).filter((country) => country.iso_3166_1 === "US"),
     },
+    // Enough for pickBackdrop / pickLogo: the best few of each.
+    images: Object.fromEntries(
+      ["backdrops", "logos"].map((kind) => [
+        kind,
+        [...(record.images?.[kind] ?? [])]
+          .sort((a, b) => (b.vote_average ?? 0) - (a.vote_average ?? 0) || (b.vote_count ?? 0) - (a.vote_count ?? 0))
+          .slice(0, 6)
+          .map(({ file_path, iso_639_1, vote_average, vote_count, width, height }) => ({
+            file_path, iso_639_1, vote_average, vote_count, width, height,
+          })),
+      ]),
+    ),
   };
   return cache[key];
 };

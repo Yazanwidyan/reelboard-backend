@@ -1,7 +1,7 @@
 import { all, catalogMeta, fromJSON, get, upsertMovie } from "../db/index.js";
 import { HttpError, notFound } from "./errors.js";
 import { tmdbGet } from "./tmdb.js";
-import { toMovie, trainVibes } from "./tmdbMovies.js";
+import { MOVIE_PARAMS, toMovie, trainVibes } from "./tmdbMovies.js";
 
 // Movies, by TMDB id. Two kinds:
 //   the pool   TMDB's well-known movies (500+ votes, about 8,000), with
@@ -85,10 +85,7 @@ export const ensureMovie = async (id) => {
   if (fetching.has(id)) return fetching.get(id);
   const task = (async () => {
     try {
-      const record = await tmdbGet(`/movie/${id}`, {
-        append_to_response: "credits,videos,release_dates",
-        language: "en-US",
-      });
+      const record = await tmdbGet(`/movie/${id}`, MOVIE_PARAMS);
       if (!record || record.adult) {
         if (known) return known;
         throw notFound(`No movie with id "${id}"`);

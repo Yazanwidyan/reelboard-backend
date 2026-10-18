@@ -214,7 +214,42 @@ export const estimateVibe = (movie, extraGenres = []) => ({
 
 // ---- Records → movies ----------------------------------------------------------
 
-// A full movie from GET /movie/{id}?append_to_response=credits,videos,release_dates.
+// What's asked for with every movie (GET /movie/{id}): its credits, videos,
+// US age ratings and images — the images in English or with no text at all.
+export const MOVIE_PARAMS = {
+  append_to_response: "credits,videos,release_dates,images",
+  include_image_language: "en,null",
+  language: "en-US",
+};
+
+// Best first: most liked, then most voted on, then biggest.
+const byQuality = (a, b) =>
+  (b.vote_average ?? 0) - (a.vote_average ?? 0) ||
+  (b.vote_count ?? 0) - (a.vote_count ?? 0) ||
+  (b.width ?? 0) - (a.width ?? 0);
+const hasNoText = (image) => image.iso_639_1 == null || image.iso_639_1 === "xx";
+
+// The best backdrop with no text on it (a still from the film, not a title
+// card), so the app's own title or logo reads cleanly over it. Without
+// one, TMDB's own pick.
+export const pickBackdrop = (record) =>
+  [...(record.images?.backdrops ?? [])].filter(hasNoText).sort(byQuality)[0]?.file_path ??
+  record.backdrop_path ??
+  null;
+
+// The movie's title art — the best English logo — as a PNG (the app can't
+// draw SVG), with its width ÷ height so the app can size it.
+export const pickLogo = (record) => {
+  const logo = [...(record.images?.logos ?? [])]
+    .filter((image) => image.file_path?.endsWith(".png") && image.width > 0 && image.height > 0)
+    .filter((image) => image.iso_639_1 === "en" || hasNoText(image))
+    .sort((a, b) => (b.iso_639_1 === "en") - (a.iso_639_1 === "en") || byQuality(a, b))[0];
+  return logo
+    ? { url: imageUrl(logo.file_path, "w500"), aspect: Math.round((logo.width / logo.height) * 100) / 100 }
+    : null;
+};
+
+// A full movie from GET /movie/{id} with MOVIE_PARAMS.
 export const toMovie = (record) => {
   const crew = record.credits?.crew ?? [];
   const cast = [...(record.credits?.cast ?? [])].sort((a, b) => a.order - b.order);
@@ -246,6 +281,8 @@ export const toMovie = (record) => {
       collection: record.belongs_to_collection
         ? { id: record.belongs_to_collection.id, name: record.belongs_to_collection.name }
         : null,
+      // The title as artwork, for the movie page's header: { url, aspect }.
+      logo: pickLogo(record),
       directors: directors.map((person) => ({ id: person.id, name: person.name })),
       writers:
         crew
@@ -264,7 +301,7 @@ export const toMovie = (record) => {
     description: record.overview || "",
     franchise: franchiseOf(record.belongs_to_collection),
     poster: imageUrl(record.poster_path, "w500"),
-    backdrop: imageUrl(record.backdrop_path, "w1280"),
+    backdrop: imageUrl(pickBackdrop(record), "w1280"),
   };
   movie.vibe = estimateVibe(movie, extraGenresOf(record));
   movie.vibeSource = "estimated";
