@@ -47,6 +47,23 @@ const NEUTRAL = { dims: [3, 3, 3, 3, 3, 3], themes: [] };
 const MAX_DISTANCE = Math.sqrt(DIMENSIONS * 16);
 
 const decadeOf = (year) => `${Math.floor(year / 10) * 10}s`;
+
+// A rating counted by how many people gave it (IMDb's Top 250 formula):
+// a 9.1 from a few hundred fans isn't better than a 8.7 from 20,000.
+// Few votes pull it towards the average; many leave it as it is.
+const RATING_VOTES = 3000;
+const AVERAGE_RATING = 6.7;
+export const weightedRating = (movie) => {
+  const votes = movie.details?.votes ?? movie.votes ?? 0;
+  return (
+    (votes / (votes + RATING_VOTES)) * (movie.rating ?? 0) +
+    (RATING_VOTES / (votes + RATING_VOTES)) * AVERAGE_RATING
+  );
+};
+// With nothing to go on (no history, no leanings) the picks are just good,
+// well-known films — more of a shuffle among them, so it isn't always the
+// same few.
+const COLD_JITTER = 2;
 const vibeOf = (movie) => movie.vibe ?? NEUTRAL;
 const clampDim = (value) => Math.min(5, Math.max(1, value));
 
@@ -115,7 +132,15 @@ export const buildTasteModel = ({ watched = [], passes = [], leanings = null, no
     const value = map.get(key);
     return value ? value.sum / Math.sqrt(value.count) : 0;
   };
-  return { ...maps, affinity, fingerprint, fingerprintWeights, dislikedCentroid: centroid(disliked) };
+  return {
+    ...maps,
+    affinity,
+    fingerprint,
+    fingerprintWeights,
+    dislikedCentroid: centroid(disliked),
+    // Nothing watched, and no "this or that" answered (all zeros).
+    cold: watchedIds.size === 0 && !leanings?.some(Boolean),
+  };
 };
 
 const bestPlusRest = (scores) => {
@@ -141,8 +166,8 @@ export const scoreMovie = (movie, model, random = Math.random) => {
   const actors = (movie.cast ?? []).map((actor) => affinity(model.cast, actor));
   if (actors.length) score += WEIGHTS.cast * Math.max(...actors);
   score += WEIGHTS.decade * affinity(model.decades, decadeOf(movie.year));
-  score += WEIGHTS.quality * (movie.rating - 7.5);
-  score += WEIGHTS.jitter * random();
+  score += WEIGHTS.quality * (weightedRating(movie) - 7.5);
+  score += (model.cold ? COLD_JITTER : WEIGHTS.jitter) * random();
   return score;
 };
 
