@@ -7,13 +7,21 @@ import {
   completeChallengeFor,
   getUserState,
   getLibrary,
+  getTaste,
   getWatchedEntry,
-  libraryMovieIds,
+  libraryExtras,
   listWatched,
   listWatchlist,
   toPick,
 } from "../lib/library.js";
-import { ensureMovie, generateRecommendations, moviesOutsidePool } from "../lib/movies.js";
+import { DEFAULT_COUNT, pickCandidates } from "../lib/candidates.js";
+import {
+  DECADE_RANGES,
+  ensureMovie,
+  generateRecommendations,
+  RUNTIME_RANGES,
+  toLean,
+} from "../lib/movies.js";
 import { collectionId, movieId, tier, timestamp } from "../lib/schemas.js";
 import { updateLevel } from "../lib/xp.js";
 import { validate } from "../middleware/validate.js";
@@ -27,7 +35,7 @@ const movieParam = z.object({ movieId });
 // watched, tonight's pick and manually unlocked collections.
 router.get("/library", (req, res) => {
   const library = getLibrary(req.userId);
-  res.json({ ...library, movies: moviesOutsidePool(libraryMovieIds(library)) });
+  res.json({ ...library, ...libraryExtras(library) });
 });
 
 // Deletes succeed even when there's nothing left to delete: the app may
@@ -277,6 +285,42 @@ router.get(
       skipIds: listWatched(req.userId).map((entry) => entry.movieId),
     });
     res.json({ movies });
+  },
+);
+
+// ---- Candidates (lib/candidates.js) ----------------------------------------
+
+// GET /api/me/candidates?genres=Drama,Comedy&decade=1990s&runtime=Any&minRating=7
+// — the few hundred movies the app chooses from, picked from the whole pool
+// for your taste and these filters (the app's preferences). `matching`: how
+// many unwatched movies match the filters; `relaxed`: how many of the
+// filters had to be loosened (0 = none) to find enough.
+router.get(
+  "/candidates",
+  validate(
+    z.object({
+      genres: z
+        .string()
+        .optional()
+        .transform((value) => (value ? value.split(",").map((g) => g.trim()).filter(Boolean) : [])),
+      decade: z.enum(Object.keys(DECADE_RANGES)).optional(),
+      runtime: z.enum(Object.keys(RUNTIME_RANGES)).optional(),
+      minRating: z.coerce.number().min(0).max(10).optional(),
+      count: z.coerce.number().int().min(10).max(500).default(DEFAULT_COUNT),
+    }),
+    "query",
+  ),
+  (req, res) => {
+    const { count, ...filters } = req.validQuery;
+    const taste = getTaste(req.userId);
+    const { movies, relaxed, matching } = pickCandidates({
+      watched: listWatched(req.userId),
+      passes: taste.passes,
+      leanings: taste.leanings,
+      filters,
+      count,
+    });
+    res.json({ movies: movies.map(toLean), filters, matching, relaxed, generatedAt: Date.now() });
   },
 );
 

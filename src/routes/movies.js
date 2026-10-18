@@ -1,7 +1,7 @@
-import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { all, catalogMeta } from "../db/index.js";
+import { attachCollections, getCollectionsForMovie } from "../lib/collections.js";
 import { notFound } from "../lib/errors.js";
 import {
   applyPreferenceFilters,
@@ -23,7 +23,9 @@ import { rateLimit } from "../middleware/rateLimit.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/movies.
-//   The pool (public): GET /, /meta, /catalog, /reels — data/catalog.json.
+//   The pool (public): GET /, /meta, /reels — see lib/movies.js. The app
+//   doesn't download the pool; it gets candidates (GET /api/me/candidates)
+//   and the movies each response mentions.
 //   Everything on TMDB (signed in, rate-limited): search, lists, discover,
 //   any movie's page, similar movies, where to watch, collections.
 const router = Router();
@@ -98,7 +100,7 @@ router.get("/", validate(listSchema, "query"), (req, res) => {
 
   const total = movies.length;
   res.json({
-    movies: movies.slice((page - 1) * limit, page * limit),
+    movies: movies.slice((page - 1) * limit, page * limit).map(toLean),
     page,
     limit,
     total,
@@ -126,47 +128,15 @@ const listClips = () =>
     end: row.end,
   }));
 
-// The catalog only changes when the server restarts (db/index.js loads
-// data/catalog.json on start), so it's serialized and hashed once.
-let catalogResponse = null;
-const getCatalogResponse = () => {
-  if (!catalogResponse) {
-    const body = JSON.stringify({
-      movies: getAllMovies().map(toLean),
-      reelClips: listClips(),
-      clipSeconds: catalogMeta.clipSeconds,
-      dimensions: catalogMeta.dimensions,
-      themes: catalogMeta.themes,
-    });
-    const hash = crypto.createHash("sha256").update(body).digest("base64url").slice(0, 27);
-    catalogResponse = { body, etag: `"${hash}"` };
-  }
-  return catalogResponse;
-};
-
-// GET /api/movies/catalog — the whole catalog in one response: every
-// movie (with cast, details and vibe), the Reels clips, and the Taste DNA
-// vocabulary. The app keeps a copy on the device and sends its ETag back as
-// If-None-Match; while the catalog is unchanged the answer is an empty 304.
-router.get("/catalog", (req, res) => {
-  const { body, etag } = getCatalogResponse();
-  res.set({ ETag: etag, "Cache-Control": "no-cache" });
-  // Compared here rather than left to Express's req.fresh, which treats any
-  // request carrying "Cache-Control: no-cache" as stale — and fetch() adds
-  // exactly that to conditional requests.
-  const known = (req.get("if-none-match") ?? "").split(",").map((tag) => tag.trim());
-  if (known.includes(etag)) return res.status(304).end();
-  res.type("json").send(body);
-});
-
-// GET /api/movies/reels — trailer clips for the Reels feed.
+// GET /api/movies/reels — trailer clips for the Reels feed, with their
+// movies.
 router.get("/reels", (req, res) => {
-  const clips = listClips().map((clip) => ({
-    ...clip,
-    thumbnail: `https://img.youtube.com/vi/${clip.youtubeId}/hqdefault.jpg`,
-    movie: getMovieById(clip.movieId),
-  }));
-  res.json({ clips, clipSeconds: catalogMeta.clipSeconds });
+  const clips = listClips();
+  res.json({
+    clips,
+    clipSeconds: catalogMeta.clipSeconds,
+    movies: clips.map((clip) => getMovieById(clip.movieId)).filter(Boolean).map(toLean),
+  });
 });
 
 // ---- Everything on TMDB --------------------------------------------------------
@@ -319,10 +289,11 @@ router.get(
 const idParam = validate(z.object({ id: movieId }), "params");
 
 // GET /api/movies/:id — any movie's page: everything, including cast with
-// photos, directors and writers.
+// photos, directors and writers — and the collections it's in, with cards
+// for their first films.
 router.get("/:id", tmdbRoute, idParam, async (req, res) => {
   const { fetchedAt, ...movie } = await ensureMovie(req.params.id);
-  res.json({ movie });
+  res.json({ movie, ...attachCollections([], getCollectionsForMovie(movie.id)) });
 });
 
 // GET /api/movies/:id/similar — TMDB's recommendations for it (or, without

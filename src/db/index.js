@@ -54,8 +54,8 @@ export const fromJSON = (text, fallback = null) => {
   }
 };
 
-// Writes one movie (the catalog's shape) into the movies table. Pool
-// movies come from data/catalog.json; others from TMDB (lib/movies.js).
+// Writes one movie into the movies table. Pool movies come from
+// `npm run build-pool` (writePool); others from TMDB (lib/movies.js).
 export const upsertMovie = (movie, { inPool = false, fetchedAt = Date.now() } = {}) =>
   run(
     `INSERT INTO movies (id, in_pool, rank, title, year, rating, runtime, director, genres, "cast",
@@ -93,29 +93,37 @@ export const upsertMovie = (movie, { inPool = false, fetchedAt = Date.now() } = 
     },
   );
 
-// Loads data/catalog.json into the movies table as the pool. Runs on every
-// start, so editing the file (or `npm run build-pool`) and restarting is
-// enough. A movie dropped from the pool stays as an ordinary movie — people
-// may have it saved.
-const syncCatalog = () => {
-  if (!fs.existsSync(config.catalogPath)) {
-    throw new Error(`No catalog at ${config.catalogPath} — run "npm run build-pool" first`);
+// The pool — about 8,000 movies — lives in the movies table (in_pool = 1),
+// written by `npm run build-pool` from TMDB. Only what people chose by hand
+// is kept in git, in data/curation.json: the curated list with its
+// hand-tuned vibes and franchises, the Taste DNA vocabulary and the Reels
+// clips. The last two are read from it on every start.
+const readCuration = () => JSON.parse(fs.readFileSync(config.curationPath, "utf8"));
+
+// The Reels clips, for the pool movies they're for.
+const syncClips = (curation) => {
+  run("DELETE FROM reel_clips");
+  for (const clip of curation.reelClips) {
+    if (!get("SELECT 1 FROM movies WHERE id = ? AND in_pool = 1", [clip.movieId])) continue;
+    run(
+      `INSERT INTO reel_clips (movie_id, youtube_id, start, "end")
+       VALUES (:movieId, :youtubeId, :start, :end)`,
+      clip,
+    );
   }
-  const catalog = JSON.parse(fs.readFileSync(config.catalogPath, "utf8"));
+};
+
+// Makes `movies` the pool (build-pool, and the tests' fixture). A movie
+// dropped from the pool stays as an ordinary movie — people may have it
+// saved. The server reads the pool once, so restart it afterwards.
+export const writePool = (movies) =>
   transaction(() => {
     run("UPDATE movies SET in_pool = 0, rank = NULL WHERE in_pool = 1");
-    for (const movie of catalog.movies) upsertMovie(movie, { inPool: true });
-    run("DELETE FROM reel_clips");
-    for (const clip of catalog.reelClips) {
-      run(
-        `INSERT INTO reel_clips (movie_id, youtube_id, start, "end")
-         VALUES (:movieId, :youtubeId, :start, :end)`,
-        clip,
-      );
-    }
+    for (const movie of movies) upsertMovie(movie, { inPool: true });
+    syncClips(readCuration());
   });
-  return catalog;
-};
+
+export const poolSize = () => get("SELECT COUNT(*) AS n FROM movies WHERE in_pool = 1").n;
 
 // schema.sql only creates what's missing, so a column added to an existing
 // table after a database was created is added here.
@@ -126,7 +134,8 @@ const migrate = () => {
   }
 };
 
-export let catalogMeta = { dimensions: [], themes: {}, clipSeconds: 30, handTagged: [] };
+// From data/curation.json: the Taste DNA vocabulary and the clip length.
+export let catalogMeta = { dimensions: [], themes: {}, clipSeconds: 30 };
 
 // 2: movies are TMDB movies, by TMDB id. Databases from before that keyed
 // everything (library, boards, clubs…) by the old catalog's "m1"… ids.
@@ -151,14 +160,13 @@ export const openDatabase = (filename = config.databasePath) => {
   db.exec(fs.readFileSync(path.join(here, "schema.sql"), "utf8"));
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   migrate();
-  const catalog = syncCatalog();
+  const curation = readCuration();
   catalogMeta = {
-    dimensions: catalog.dimensions,
-    themes: catalog.themes,
-    clipSeconds: catalog.clipSeconds,
-    // What the vibe estimate learns from (lib/movies.js).
-    handTagged: catalog.movies.filter((movie) => movie.vibeSource === "hand"),
+    dimensions: curation.dimensions,
+    themes: curation.themes,
+    clipSeconds: curation.clipSeconds,
   };
+  transaction(() => syncClips(curation));
   return db;
 };
 

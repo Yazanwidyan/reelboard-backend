@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { listActivity, logActivity } from "../lib/activity.js";
-import { moviesOutsidePool } from "../lib/movies.js";
+import { moviesFor } from "../lib/movies.js";
 import { friendIdsOf } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
 
@@ -26,13 +26,13 @@ router.get("/", validate(feedQuery, "query"), (req, res) => {
   const userIds = friendIdsOf(req.userId);
   if (includeMine) userIds.push(req.userId);
   const activity = listActivity(userIds, { before, limit });
-  res.json({ activity, movies: moviesOutsidePool(activity.map((event) => event.movieId)) });
+  res.json({ activity, movies: moviesFor(activity.map((event) => event.movieId)) });
 });
 
 router.get("/mine", validate(feedQuery, "query"), (req, res) => {
   const { before, limit } = req.validQuery;
   const activity = listActivity([req.userId], { before, limit });
-  res.json({ activity, movies: moviesOutsidePool(activity.map((event) => event.movieId)) });
+  res.json({ activity, movies: moviesFor(activity.map((event) => event.movieId)) });
 });
 
 const achievementSchema = z.discriminatedUnion("type", [

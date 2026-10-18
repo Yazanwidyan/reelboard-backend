@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { all, get } from "../db/index.js";
-import { moviesOutsidePool } from "../lib/movies.js";
+import { moviesFor } from "../lib/movies.js";
 import { movieId, TIERS } from "../lib/schemas.js";
 import { validate } from "../middleware/validate.js";
 
@@ -74,7 +74,7 @@ router.get(
       days,
       trending,
       favorites,
-      movies: moviesOutsidePool([...trending, ...favorites].map((row) => row.movieId)),
+      movies: moviesFor([...trending, ...favorites].map((row) => row.movieId)),
     });
   },
 );

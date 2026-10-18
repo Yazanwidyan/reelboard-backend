@@ -11,6 +11,7 @@ import authRoutes from "./routes/auth.js";
 import boardRoutes from "./routes/boards.js";
 import challengeRoutes from "./routes/challenges.js";
 import clubRoutes from "./routes/clubs.js";
+import collectionRoutes from "./routes/collections.js";
 import communityRoutes from "./routes/community.js";
 import { friendsRouter, usersRouter } from "./routes/friends.js";
 import libraryRoutes from "./routes/library.js";
@@ -27,7 +28,8 @@ export const createApp = () => {
 
   app.disable("x-powered-by");
   app.use(helmet());
-  // The catalog is ~340 KB of JSON; gzipped it's a fraction of that.
+  // Responses carry movies (candidates are a few hundred KB of JSON); gzipped
+  // they're a fraction of that.
   app.use(compression());
   app.use(
     cors({
@@ -58,6 +60,7 @@ export const createApp = () => {
   app.use("/api/activity", signedIn, activityRoutes);
   app.use("/api/community", signedIn, communityRoutes);
   app.use("/api/clubs", signedIn, clubRoutes);
+  app.use("/api/collections", signedIn, collectionRoutes);
   app.use("/api/people", signedIn, peopleRoutes);
   app.use("/api/movie-nights", signedIn, movieNightRoutes);
 

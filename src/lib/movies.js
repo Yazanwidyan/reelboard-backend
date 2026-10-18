@@ -4,11 +4,14 @@ import { tmdbGet } from "./tmdb.js";
 import { toMovie, trainVibes } from "./tmdbMovies.js";
 
 // Movies, by TMDB id. Two kinds:
-//   the pool   data/catalog.json — curated, with hand-tuned or estimated
-//              vibes. Small and read-only while the server runs, so it's held
-//              in memory and filtered in JS with the app's own rules
-//              (src/utils/movieFilters.js). Swipe, recommendations, the
-//              catalog the app downloads and collections use only these.
+//   the pool   TMDB's well-known movies (500+ votes, about 8,000), with
+//              hand-tuned or estimated vibes — in the movies table
+//              (in_pool = 1), written by `npm run build-pool`. Read-only
+//              while the server runs, so it's held in memory and filtered in
+//              JS with the app's own rules (src/utils/movieFilters.js).
+//              Candidates (lib/candidates.js) and collections
+//              (lib/collections.js) come from these. The app never downloads
+//              the pool.
 //   the rest   any other TMDB movie, fetched the first time someone opens or
 //              saves it (ensureMovie) and kept in the movies table, refreshed
 //              when it's older than a week.
@@ -46,7 +49,10 @@ export const getAllMovies = () => {
     const movies = all("SELECT * FROM movies WHERE in_pool = 1 ORDER BY rank").map(rowToMovie);
     pool = { list: movies, byId: new Map(movies.map((movie) => [movie.id, movie])) };
     // New movies' vibes are estimated from the pool's hand-tagged ones.
-    trainVibes(catalogMeta.handTagged, catalogMeta.themes);
+    trainVibes(
+      movies.filter((movie) => movie.vibeSource === "hand"),
+      catalogMeta.themes,
+    );
   }
   return pool.list;
 };
@@ -129,12 +135,13 @@ export const toLean = ({ inPool, fetchedAt, vibeSource, ...movie }) => ({
     : null,
 });
 
-// The movies behind a list of ids that aren't in the pool — what a response
-// sends alongside ids, since the app only has the pool. Only movies the
-// server has; never asks TMDB.
-export const moviesOutsidePool = (ids) =>
+// The movies behind a list of ids — what a response sends alongside ids.
+// The app doesn't download the pool, so it only knows the movies responses
+// bring it (services/api.js remembers every response's `movies`). Only
+// movies the server has; never asks TMDB.
+export const moviesFor = (ids) =>
   [...new Set(ids)]
-    .filter((id) => id && !isPoolMovie(id))
+    .filter(Boolean)
     .map(getMovieById)
     .filter(Boolean)
     .map(toLean);

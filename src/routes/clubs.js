@@ -5,7 +5,7 @@ import { all, get, run, transaction } from "../db/index.js";
 import { listActivity } from "../lib/activity.js";
 import { badRequest, conflict, forbidden, notFound } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
-import { ensureMovie, ensureMovies, moviesOutsidePool } from "../lib/movies.js";
+import { ensureMovie, ensureMovies, moviesFor } from "../lib/movies.js";
 import { movieId, uniqueIds } from "../lib/schemas.js";
 import { toPublicUser } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
@@ -130,7 +130,7 @@ const reload = (clubId) => get("SELECT * FROM clubs WHERE id = ?", [clubId]);
 // app can show them).
 const withMovies = (club) => ({
   club,
-  movies: moviesOutsidePool([
+  movies: moviesFor([
     ...club.movies.map((entry) => entry.movieId),
     club.nowWatching?.movieId,
   ]),
@@ -153,7 +153,7 @@ router.get("/", (req, res) => {
   ).map((row) => toSummary(row, row.role));
   res.json({
     clubs,
-    movies: moviesOutsidePool(clubs.flatMap((club) => [...club.movieIds, club.nowWatching])),
+    movies: moviesFor(clubs.flatMap((club) => [...club.movieIds, club.nowWatching])),
   });
 });
 
@@ -352,7 +352,7 @@ router.get(
       limit,
       movieIds: clubMovieIds(club),
     });
-    res.json({ activity, movies: moviesOutsidePool(activity.map((event) => event.movieId)) });
+    res.json({ activity, movies: moviesFor(activity.map((event) => event.movieId)) });
   },
 );
 

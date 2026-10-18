@@ -3,7 +3,7 @@ import { z } from "zod";
 import { all, fromJSON, get, run } from "../db/index.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
 import { listBoards } from "../lib/library.js";
-import { moviesOutsidePool } from "../lib/movies.js";
+import { moviesFor } from "../lib/movies.js";
 import { notify } from "../lib/push.js";
 import { handle } from "../lib/schemas.js";
 import { areFriends, friendIdsOf, getUserRow, toPublicUser } from "../lib/users.js";
@@ -51,7 +51,7 @@ const toFriend = (row) => ({
 
 // Friends' movies outside the pool, so the app can show them.
 const friendMovies = (friends) =>
-  moviesOutsidePool(
+  moviesFor(
     friends.flatMap((friend) => [...(friend.topTen ?? []), ...(friend.watched ?? []).map((entry) => entry.movieId)]),
   );
 

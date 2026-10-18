@@ -9,11 +9,12 @@ It's built with Node.js, Express 5 and SQLite (Node's built-in `node:sqlite`, so
 ```bash
 npm install
 cp .env.example .env      # then set JWT_SECRET and TMDB_READ_TOKEN
+npm run build-pool        # puts ~8,000 movies from TMDB into the database (a few minutes, once)
 npm run dev               # http://localhost:4000/api, restarts on changes
 npm test                  # end-to-end tests against an in-memory database
 ```
 
-The database file is created at `data/reelboard.db` on first start. The pool in `data/catalog.json` is loaded into it on every start.
+The database file is created at `data/reelboard.db` (set `DATABASE_PATH` to put it elsewhere). It holds everything, the movies included; nothing is read from big files at start-up.
 
 **Upgrading from before TMDB:** a database from when movies had ids like `m42` can't be used any more, and the server says so at start-up. Stop the server, delete `data/reelboard.db` (and its `-wal` / `-shm` files) and start again. This deletes all accounts.
 
@@ -23,23 +24,28 @@ Every movie comes from [TMDB](https://www.themoviedb.org), whose API terms allow
 
 There are two kinds of movies:
 
-- **The pool** (`data/catalog.json`): about 1,100 curated movies, each with a Taste DNA vibe (`{ dims: [6 × 1–5], themes }`). 250 were tuned by hand (`vibeSource: "hand"`); the rest are estimated by a model learnt from those. Swipe, Spin, recommendations, collections and the catalog the app downloads (`GET /api/movies/catalog`) use only the pool.
+- **The pool** (in the database's `movies` table, `in_pool = 1`): TMDB's well-known movies, about 8,000 (everything with 500+ votes, plus curated seeds), each with a Taste DNA vibe (`{ dims: [6 × 1–5], themes }`). 250 were tuned by hand (`vibeSource: "hand"`); the rest are estimated by a model learnt from those. Candidates (what the app swipes, spins and picks from) and collections come from the pool.
 - **Everything else on TMDB:** found with search or browsing. The server fetches a movie the first time someone opens or saves it, keeps it in the `movies` table with an estimated vibe, and refreshes it when it's more than a week old. Any movie can be watched, tiered, saved, put on a board or added to a club.
 
-Responses that carry movie ids (`/me`, `/friends`, `/activity`, `/boards`, clubs, trending) also carry a `movies` list with the ones outside the pool, so the app can show them. The pool's movies it already has.
+**The app doesn't download the pool.** It gets:
+- **Candidates:** `GET /api/me/candidates` picks a few hundred movies from the whole pool for the person's taste and filters (`src/lib/candidates.js`). The app keeps them in memory; nothing is saved on the phone.
+- **The movies each response mentions:** responses that carry movie ids (`/me`, `/me/library`, `/friends`, `/activity`, `/boards`, clubs, trending, `/movies/reels`) also carry a `movies` list with those movies.
+- **Collections as definitions** (see Collections below), with "cards" for their films: `{ id, title, year, rating, runtime, genres, director, cast, franchise, poster, rank, partial: true }`, enough for a poster. The app fetches the full movie when it opens one.
 
-**Building the pool:**
+**Building the pool** (into the database; git keeps only what people chose by hand):
 
 ```bash
-npm run build-pool                 # refresh every pool movie from TMDB
-npm run build-pool -- --grow 500   # also add up to 500 of TMDB's most-voted movies
-npm run build-pool -- --offline    # re-apply data/tmdb-cache.json, no requests
+npm run build-pool                 # curated + seeds + every TMDB movie with 500+ votes
+npm run build-pool -- --grow 500   # only up to 500 beyond the curated ones and seeds
+npm run build-pool -- --offline    # cached TMDB answers only, no requests
 ```
 
-- **Kept from the curated catalog:** hand-tuned vibes, franchise tags, rank order and the Reels clips. Everything else (title, year, rating, runtime, genres, director, cast, plot, poster, backdrop, trailer, age rating) comes from TMDB.
+- **`data/curation.json`** (in git, about 80 KB): the curated list in rank order, with the 250 hand-tuned vibes and hand-set franchises, plus the Taste DNA vocabulary and the Reels clips. The server reads the vocabulary and clips from it on start. Everything else about a movie (title, year, rating, runtime, genres, director, cast and crew, plot, poster, backdrop, trailer, age rating) comes from TMDB.
+- **Order:** the curated list first, then new seeds, then TMDB's most-voted movies. That's the movies' `rank`.
 - **Seeds:** `data/seed-movies.txt` lists movies for the pool, one per line as `Title|Year|Franchise|imdbId`. Franchise and IMDb id are optional; an IMDb id pins the exact film when a title is ambiguous. Seeds not in the pool yet are added; seeds already in it get their franchise set. The script lists any seed TMDB can't find.
 - **Cache:** TMDB's answers are kept in `data/tmdb-cache.json` (not committed), so re-runs only ask about what's new.
-- **Afterwards:** restart the server. The app picks up the new catalog on its next start (its `ETag` changes).
+- **Time:** a first run asks TMDB about ~8,000 movies, a few minutes; later runs only ask about new ones.
+- **Afterwards:** restart the server (it reads the pool once). Candidates and collections come from the new pool straight away; the app gets new candidates the next time it asks (when they're 12 hours old, or the filters change).
 
 **Ratings:** `rating` is TMDB's average vote (0–10), alongside ReelBoard's own community tiers. IMDb, Rotten Tomatoes and Metacritic scores aren't used, because they aren't licensed for an app like this.
 
@@ -82,10 +88,9 @@ The pool (public):
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/movies` | Pool only. Query: `q`, `genres=Drama,Comedy` (matches any), `decade`, `runtime`, `minRating`, `director`, `ids=603,550`, `sort=rank\|rating\|year\|runtime\|title`, `order`, `page`, `limit` |
-| GET | `/api/movies/catalog` | The whole pool in one response: every movie (without the movie-page extras), the Reels clips, and the Taste DNA vocabulary. Sent with an `ETag`. Send it back as `If-None-Match` and, while the pool is unchanged, the answer is an empty `304`. |
+| GET | `/api/movies` | Pool only. Query: `q` (title, director, cast or year — the app's search uses it), `genres=Drama,Comedy` (matches any), `decade`, `runtime`, `minRating`, `director`, `ids=603,550` (the sign-in screen's poster wall uses it), `sort=rank\|rating\|year\|runtime\|title`, `order`, `page`, `limit` |
 | GET | `/api/movies/meta` | genres, decades, runtimes, Taste DNA dimensions and themes |
-| GET | `/api/movies/reels` | trailer clips for the Reels feed |
+| GET | `/api/movies/reels` | `{ clips: [{ movieId, youtubeId, start, end }], clipSeconds, movies }`: trailer clips for the Reels feed, with their movies |
 
 Everything on TMDB (signed in, at most 120 requests a minute per account):
 
@@ -95,7 +100,7 @@ Everything on TMDB (signed in, at most 120 requests a minute per account):
 | GET | `/api/movies/lists/:kind` | `trending`, `popular`, `now-playing`, `upcoming`, `top-rated`. `?page`, and `region=GB` (two letters) for what's in cinemas there. |
 | GET | `/api/movies/discover` | `?genre=Sci-Fi&decade=1990s&minRating=7&sort=popular\|rating\|newest&page`. Feature films only (40+ minutes). |
 | GET | `/api/movies/batch` | `?ids=603,550` (up to 50). Several movies at once; unknown ids are left out. |
-| GET | `/api/movies/:id` | Any movie's page: the full movie, including `details.castDetails` (with photos and characters), `directors`, `writers`, `trailer`, `collection`, `rated`. Fetched from TMDB the first time. `inPool` says whether it's in the pool. |
+| GET | `/api/movies/:id` | Any movie's page: the full movie, including `details.castDetails` (with photos and characters), `directors`, `writers`, `trailer`, `collection`, `rated`. Fetched from TMDB the first time. `inPool` says whether it's in the pool. Also `collections`: the ones it's in (with cards in `movies`). |
 | GET | `/api/movies/:id/similar` | TMDB's recommendations for it (or its similar movies, without any). |
 | GET | `/api/movies/:id/providers` | `?region=US`. Where to watch it there: `{ stream, free, ads, rent, buy }` (each `[{ id, name, logo }]`), `link`, and `source: "JustWatch"`. |
 | GET | `/api/movies/collections/:id` | A TMDB collection ("The Dark Knight Collection"): `{ name, franchise, overview, poster, movies }`, oldest first. |
@@ -109,7 +114,7 @@ Everything on TMDB (signed in, at most 120 requests a minute per account):
 ### Me
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/me` | **Everything at once:** profile, settings, library, boards, challenges, taste, recent searches. The app uses it on sign-in, and to refresh everything when it comes back to the front. |
+| GET | `/api/me` | **Everything at once:** profile, settings, library, boards, challenges, taste, recent searches — and `movies` (every movie in them) and `collections` (yours, as in `/me/library`). The app uses it on sign-in, and to refresh everything when it comes back to the front. |
 | POST | `/api/me/import` | Uploads the app's local AsyncStorage stores (`{ movieStore, boardStore, profileStore, userStore, tasteStore, challengeStore, languageStore, themeStore, tipsStore, recentSearchStore }`, each optional). Each store you send **replaces** that part of the account. |
 | DELETE | `/api/me` | `{ password }`. Deletes the account and all its data. |
 | GET / PATCH | `/api/me/profile` | `{ displayName, bio, avatarUri, handle }`. `xp` and `level` are read-only (see below). |
@@ -121,7 +126,7 @@ Everything on TMDB (signed in, at most 120 requests a minute per account):
 ### Library
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/me/library` | the whole library at once: `{ bucketList, watched, pickedMovie, pickMood, unlockedCollections }` |
+| GET | `/api/me/library` | the whole library at once: `{ bucketList, watched, pickedMovie, pickMood, unlockedCollections }`, plus `movies` (every movie in it) and `collections` (the ones you've started or unlocked — see Collections) |
 | GET / POST | `/api/me/watchlist` | POST `{ movieId }` |
 | DELETE | `/api/me/watchlist/:movieId`, `/api/me/watchlist` | remove one, or clear |
 | GET / POST | `/api/me/watched` | POST `{ movieId, tier?, watchedAt? }`. This also removes the movie from the watchlist, clears it as the pick, and completes the active challenge if the movie is its target (returned as `completedChallenge`). |
@@ -130,7 +135,8 @@ Everything on TMDB (signed in, at most 120 requests a minute per account):
 | DELETE | `/api/me/watched/:movieId`, `/api/me/watched` | |
 | GET / PUT / DELETE | `/api/me/pick` | PUT `{ movieId, mood? }` |
 | PUT / DELETE | `/api/me/unlocked-collections/:collectionId` | |
-| GET | `/api/me/recommendations` | `?count=10&includeWatchlist=true`. Watchlist movies get guaranteed slots, the rest follow your preferences, and watched movies are skipped. |
+| GET | `/api/me/candidates` | `?genres=Horror,Thriller&decade=1980s&runtime=Any&minRating=7&count=300` (10–500). The movies the app chooses from: the whole pool minus what you've watched (and passed on this week), filtered, ranked by your taste (tiers, passes, leanings — the app's own taste engine), three quarters best-ranked and a quarter at random. If fewer than `count` match, every match comes first, then the closest as the filters loosen. Returns `{ movies, matching (how many match exactly), relaxed (0 = nothing loosened), filters, generatedAt }`. |
+| GET | `/api/me/recommendations` | `?count=10&includeWatchlist=true`. Watchlist movies get guaranteed slots, the rest follow your preferences, and watched movies are skipped. (Not used by the app.) |
 
 ### Challenges and taste
 | Method | Path | Notes |
@@ -224,6 +230,17 @@ The server sends through Expo's push service (`src/lib/push.js`) for: friend req
 
 **Before server push works,** the app needs an EAS project id: run `eas init` in `../Reelboard` (free Expo account) and make a new build. Until then the app still gets its own reminders, which need no server: tonight's pick at 7:30 pm and the monthly recap on the 1st.
 
+### Collections (signed in)
+
+A franchise, a director's films, an actor's films, the best of a decade or a genre, worked out from the pool (`src/lib/collections.js`). They're sent as definitions, `{ id, type, title, movieIds }`, with ids like `director-christopher-nolan`:
+- **franchise, director:** 2+ pool films. **actor:** 3+ in the top-billed cast. **decade, genre:** all of them, trimmed to the 15 best-ranked ("Best of the 1990s").
+- **Yours** come with `/me/library` and `/me`: every one you've unlocked, and the ones you've started. For a franchise, decade or genre one film is a start; for a director or an actor it takes two. That always includes every finished collection, and every one a single watch could finish, so the app's XP (and a dare's promised XP) matches the server's.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/collections` | The best-known 30 franchises, directors and actors (by their films' TMDB votes), and every decade and genre, with cards for the first 4 films of each. Sent with an `ETag` (`If-None-Match` → `304`). The app's collection browser and suggestions use it. |
+| GET | `/api/collections/:id` | One collection, with cards for every film in it. |
+
 ### XP and level
 
 The server works these out from the watch history (`src/lib/xp.js`) and stores them on the account, so the level friends see can't be faked:
@@ -235,7 +252,7 @@ The rules:
 - 100 XP per movie watched
 - 50 per genre and 50 per decade
 - 75 per director you've seen 3+ films by
-- 200 per finished franchise / director / actor collection of 3+ films
+- 200 per finished franchise / director / actor collection of 3+ films (the pool's — see Collections)
 - 10 per rated movie
 
 ## The app and this server
@@ -243,8 +260,9 @@ The rules:
 The ReelBoard app requires an account and treats this server as the source of truth. It uses TanStack Query to cache the account on the device (see the app's `src/services/queryClient.js`):
 
 - **Reading:** each part of the account is its own query, fetched from its own endpoint (`/me/library`, `/boards`, `/me/profile`, `/me/settings`, `/me/taste`, `/me/challenges`, `/me/searches`). On sign-in, and whenever the app comes back to the front, `GET /api/me` fills all of them in one request.
-- **Saved on the phone:** the cache is saved on the device, so the app opens straight onto the last data it had, even offline. The catalog is saved separately and checked with its `ETag`, so it's only downloaded when it changes.
-- **Changing:** a change shows in the app at once and is queued as an API call with an `Idempotency-Key`. Queued calls go out one at a time, in order. Offline they wait, saved on the device so a restart doesn't lose them, and go out once the server can be reached. When the queue is empty, the parts of the account it touched are refetched. If the server rejects a change, the app says so and the refetch undoes it.
+- **Nothing saved on the phone** but the sign-in session (and the language and theme, which the layout needs before anything loads). Every launch loads the account from the server, with a loading screen and Retry. There's no offline mode.
+- **Movies:** there's no catalog on the phone. The app keeps (in memory) every movie a response brought it, and its candidates; asking for a movie it doesn't have fetches it (`/movies/batch`). Search looks through the phone's movies, the pool (`/movies?q=`) and all of TMDB (`/movies/search`) at once.
+- **Changing:** a change shows in the app at once and goes to the server straight away, one at a time and in order, each with an `Idempotency-Key` (so a quick retry is safe). When they are done, the parts of the account they touched are refetched. If a change fails (rejected, or the server can't be reached) the app says so and refetches; nothing is kept to send later.
 
 **Running both in development:**
 

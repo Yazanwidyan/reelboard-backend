@@ -1,30 +1,34 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { createApp } from "../src/app.js";
-import { all, closeDatabase, get, openDatabase, run } from "../src/db/index.js";
+import { all, closeDatabase, get, openDatabase, run, writePool } from "../src/db/index.js";
 import { pushTransport } from "../src/lib/push.js";
 import { pruneActivity } from "../src/lib/activity.js";
 import { verifiers } from "../src/lib/social.js";
 import fs from "node:fs";
+import zlib from "node:zlib";
 import { FAKE_COLLECTION_ID, FAKE_MOVIE_ID, FAKE_PERSON_ID, startFakeTmdb } from "./fakeTmdb.js";
 
-// However many movies data/catalog.json holds — it grows (scripts/build-pool.js).
-const CATALOG_SIZE = JSON.parse(
-  fs.readFileSync(new URL("../data/catalog.json", import.meta.url), "utf8"),
-).movies.length;
+// The pool for the tests: the curated movies, as build-pool makes them
+// (without the movie-page extras). The real pool is built from TMDB.
+const POOL = JSON.parse(
+  zlib.gunzipSync(fs.readFileSync(new URL("./fixtures/pool.json.gz", import.meta.url))).toString("utf8"),
+);
+const CATALOG_SIZE = POOL.length;
 
 let server;
 let base;
 let tmdb;
 
 before(async () => {
-  // A fake TMDB (test/fakeTmdb.js): the pool comes from data/catalog.json,
+  // A fake TMDB (test/fakeTmdb.js): the pool comes from the fixture,
   // anything else from here.
   tmdb = await startFakeTmdb();
   process.env.TMDB_API_URL = tmdb.url;
   process.env.TMDB_READ_TOKEN = "test-token";
   delete process.env.TMDB_API_KEY;
   openDatabase(":memory:");
+  writePool(POOL);
   server = createApp().listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   base = `http://127.0.0.1:${server.address().port}/api`;
@@ -218,27 +222,133 @@ describe("movies", () => {
 
     const reels = await api("GET", "/movies/reels");
     assert.ok(reels.body.clips.length > 0);
-    assert.ok(reels.body.clips[0].movie.title);
+    assert.deepEqual(Object.keys(reels.body.clips[0]).sort(), ["end", "movieId", "start", "youtubeId"]);
+    const reelIds = new Set(reels.body.movies.map((movie) => movie.id));
+    assert.ok(reels.body.clips.every((clip) => reelIds.has(clip.movieId)));
 
     assert.equal((await api("GET", "/movies?decade=1850s")).status, 400);
 
-    const catalog = await api("GET", "/movies/catalog");
-    assert.equal(catalog.body.movies.length, CATALOG_SIZE);
-    assert.equal(catalog.body.movies[0].vibe.dims.length, 6);
-    assert.ok(catalog.body.movies.every((movie) => Array.isArray(movie.cast)));
-    assert.ok(catalog.body.reelClips.length > 0);
-    assert.deepEqual(Object.keys(catalog.body.reelClips[0]).sort(), ["end", "movieId", "start", "youtubeId"]);
-    assert.equal(catalog.body.dimensions.length, 6);
-    assert.ok(catalog.body.themes.twist);
+    // The app no longer downloads the pool.
+    assert.notEqual((await api("GET", "/movies/catalog", { token })).status, 200);
+  });
+});
 
-    // The app's saved copy is still current: an empty 304.
-    const etag = catalog.headers.get("etag");
-    assert.ok(etag);
-    const unchanged = await api("GET", "/movies/catalog", { headers: { "if-none-match": etag } });
-    assert.equal(unchanged.status, 304);
-    assert.equal(unchanged.body, null);
-    const stale = await api("GET", "/movies/catalog", { headers: { "if-none-match": '"old"' } });
-    assert.equal(stale.status, 200);
+// Christopher Nolan films in the pool, by TMDB id.
+const NOLAN = { darkKnight: "155", inception: "27205", interstellar: "157336", prestige: "1124", memento: "77" };
+
+describe("candidates", () => {
+  let token;
+  before(async () => {
+    ({ token } = await register("Candid Person", "candid"));
+  });
+
+  test("a few hundred pool movies, full enough to swipe, none of them watched", async () => {
+    const fresh = await api("GET", "/me/candidates", { token });
+    assert.equal(fresh.status, 200);
+    assert.equal(fresh.body.movies.length, 300);
+    assert.equal(fresh.body.relaxed, 0);
+    const first = fresh.body.movies[0];
+    assert.equal(first.vibe.dims.length, 6);
+    assert.ok(first.poster && first.description !== undefined && Array.isArray(first.cast));
+    assert.equal(first.details.castDetails, undefined, "the movie page's extras stay on the page");
+    assert.equal(new Set(fresh.body.movies.map((movie) => movie.id)).size, 300);
+
+    for (const movieId of [NOLAN.darkKnight, NOLAN.inception, NOLAN.interstellar]) {
+      const r = await api("POST", "/me/watched", { token, body: { movieId, tier: "S" } });
+      assert.equal(r.status, 201, JSON.stringify(r.body));
+    }
+    const after = await api("GET", "/me/candidates?count=100", { token });
+    assert.equal(after.body.movies.length, 100);
+    const ids = new Set(after.body.movies.map((movie) => movie.id));
+    assert.ok(!ids.has(NOLAN.darkKnight) && !ids.has(NOLAN.inception));
+    // Three Nolan films in S: his others rank near the top.
+    assert.ok(ids.has(NOLAN.prestige), "The Prestige is picked for a Nolan fan");
+  });
+
+  test("filters narrow the whole pool, and loosen only when too few match", async () => {
+    const horror = await api("GET", "/me/candidates?genres=Horror&count=50", { token });
+    assert.equal(horror.body.relaxed, 0);
+    assert.ok(horror.body.matching > 50, "counts every match, not just the ones sent");
+    assert.ok(horror.body.movies.every((movie) => movie.genres.includes("Horror")));
+
+    const nineties = await api("GET", "/me/candidates?decade=1990s&runtime=Under%202%20hours&count=50", { token });
+    assert.ok(nineties.body.movies.every((movie) => movie.year >= 1990 && movie.year <= 1999 && movie.runtime < 120));
+
+    // Too few 80s horrors for 300: all of them first, then the closest.
+    const eighties = await api("GET", "/me/candidates?genres=Horror&decade=1980s", { token });
+    assert.ok(eighties.body.relaxed > 0 && eighties.body.matching < 300);
+    const isMatch = (movie) => movie.genres.includes("Horror") && movie.year >= 1980 && movie.year <= 1989;
+    const firsts = eighties.body.movies.slice(0, eighties.body.matching);
+    assert.ok(firsts.every(isMatch), "every exact match comes first");
+    assert.equal(eighties.body.movies.filter(isMatch).length, eighties.body.matching, "and none is left out");
+
+    const tooNarrow = await api("GET", "/me/candidates?genres=Western&decade=Older&minRating=9.5&count=50", { token });
+    assert.ok(tooNarrow.body.relaxed > 0);
+    assert.equal(tooNarrow.body.matching, 0);
+    assert.equal(tooNarrow.body.movies.length, 50);
+
+    assert.equal((await api("GET", "/me/candidates?decade=1850s", { token })).status, 400);
+    assert.equal((await api("GET", "/me/candidates")).status, 401);
+  });
+});
+
+describe("collections", () => {
+  let token;
+  before(async () => {
+    ({ token } = await register("Collector", "collector"));
+  });
+
+  test("your library brings the collections you've started, with cards for their films", async () => {
+    await api("POST", "/me/watched", { token, body: { movieId: NOLAN.darkKnight } });
+    let library = await api("GET", "/me/library", { token });
+    assert.ok(library.body.movies.some((movie) => movie.id === NOLAN.darkKnight && movie.vibe));
+    const ids = () => library.body.collections.map((collection) => collection.id);
+    // One film starts a franchise or a decade — a director takes two.
+    assert.ok(ids().includes("franchise-the-dark-knight-trilogy"));
+    assert.ok(!ids().includes("director-christopher-nolan"));
+
+    await api("POST", "/me/watched", { token, body: { movieId: NOLAN.inception } });
+    library = await api("GET", "/me/library", { token });
+    const nolan = library.body.collections.find((collection) => collection.id === "director-christopher-nolan");
+    assert.ok(nolan, "two Nolan films start his collection");
+    assert.equal(nolan.type, "director");
+    assert.ok(nolan.movieIds.includes(NOLAN.prestige));
+    const byId = new Map(library.body.movies.map((movie) => [movie.id, movie]));
+    // The watched ones in full; the rest as cards (no vibe), enough for a collage.
+    assert.ok(byId.get(NOLAN.inception).vibe);
+    const card = nolan.movieIds.map((id) => byId.get(id)).find((movie) => movie?.partial);
+    assert.ok(card && card.poster && card.title && !card.vibe);
+
+    // Unlocked by hand: there even with nothing watched.
+    await api("PUT", "/me/unlocked-collections/genre-best-of-horror", { token });
+    library = await api("GET", "/me/library", { token });
+    assert.ok(library.body.collections.some((collection) => collection.id === "genre-best-of-horror"));
+
+    // GET /me carries the same.
+    const me = await api("GET", "/me", { token });
+    assert.ok(me.body.collections.some((collection) => collection.id === "director-christopher-nolan"));
+    assert.equal(me.body.bucketList, undefined);
+  });
+
+  test("featured collections to browse, one collection in full, a movie's own", async () => {
+    const featured = await api("GET", "/collections", { token });
+    assert.equal(featured.status, 200);
+    const types = new Set(featured.body.collections.map((collection) => collection.type));
+    for (const type of ["franchise", "director", "actor", "decade", "genre"]) assert.ok(types.has(type), type);
+    assert.ok(featured.body.movies.length > 0);
+    const etag = featured.headers.get("etag");
+    assert.equal((await api("GET", "/collections", { token, headers: { "if-none-match": etag } })).status, 304);
+
+    const nolan = await api("GET", "/collections/director-christopher-nolan", { token });
+    assert.equal(nolan.body.collection.title, "Christopher Nolan");
+    assert.deepEqual(
+      new Set(nolan.body.movies.map((movie) => movie.id)),
+      new Set(nolan.body.collection.movieIds),
+    );
+    assert.equal((await api("GET", "/collections/director-nobody-at-all", { token })).status, 404);
+
+    const inception = await api("GET", `/movies/${NOLAN.inception}`, { token });
+    assert.ok(inception.body.collections.some((collection) => collection.id === "director-christopher-nolan"));
   });
 });
 
@@ -278,9 +388,12 @@ describe("library", () => {
     assert.equal(state.body.challenges.history.length, 1);
 
     const library = await api("GET", "/me/library", { token });
-    const { movies, ...rest } = library.body;
+    const { movies, collections, ...rest } = library.body;
     assert.deepEqual(rest, state.body.library);
-    assert.deepEqual(movies, [], "every movie here is in the pool");
+    // The app has no catalog: the library brings its own movies.
+    const sent = new Set(movies.map((movie) => movie.id));
+    assert.ok(state.body.library.watched.every((entry) => sent.has(entry.movieId)));
+    assert.deepEqual(collections, state.body.collections);
 
     // Nothing active any more: skipping is a harmless no-op.
     const skipped = await api("POST", "/me/challenges/active/skip", { token });

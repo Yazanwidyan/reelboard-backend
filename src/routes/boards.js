@@ -4,7 +4,7 @@ import { get, run, transaction } from "../db/index.js";
 import { conflict, forbidden, notFound } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { listBoards, toBoard } from "../lib/library.js";
-import { ensureMovie, ensureMovies, moviesOutsidePool } from "../lib/movies.js";
+import { ensureMovie, ensureMovies, moviesFor } from "../lib/movies.js";
 import { BOARD_NAME_MAX, boardId, movieId, uniqueIds } from "../lib/schemas.js";
 import { areFriends } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
@@ -43,7 +43,7 @@ const setMovies = (boardId, movieIds) => {
 
 router.get("/", (req, res) => {
   const boards = listBoards(req.userId);
-  res.json({ boards, movies: moviesOutsidePool(boards.flatMap((board) => board.movieIds)) });
+  res.json({ boards, movies: moviesFor(boards.flatMap((board) => board.movieIds)) });
 });
 
 // `id` is optional: the app sends its own board id so later edits can use

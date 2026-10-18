@@ -20,7 +20,8 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   // ":memory:" works too — handy for tests.
   databasePath: process.env.DATABASE_PATH ?? path.join(root, "data", "reelboard.db"),
-  catalogPath: path.join(root, "data", "catalog.json"),
+  // What people chose by hand (the pool itself is in the database).
+  curationPath: path.join(root, "data", "curation.json"),
   jwtSecret: process.env.JWT_SECRET ?? "dev-only-secret-change-me",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "30d",
   // Comma-separated list, or "*" for any origin (the default; a native app

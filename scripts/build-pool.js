@@ -1,39 +1,42 @@
-// Builds data/catalog.json — the pool — from TMDB.
+// Builds the pool — ReelBoard's ~8,000 movies — from TMDB, into the
+// database (the movies table, in_pool = 1). Git keeps only what people
+// chose by hand: data/curation.json and data/seed-movies.txt.
 //
-//   npm run build-pool                 (refresh every pool movie from TMDB)
-//   npm run build-pool -- --grow 500   (also add up to 500 of TMDB's most-
-//                                       voted movies not in the pool yet)
+//   npm run build-pool                 (curated + seeds + every TMDB movie
+//                                       with 500+ votes)
+//   npm run build-pool -- --grow 500   (only up to 500 beyond the curated
+//                                       ones and seeds)
 //   npm run build-pool -- --offline    (cached answers only, no requests)
 //
-// data/seed-movies.txt is read on every run: one movie per line as
-// Title|Year|Franchise|imdbId (franchise and IMDb id optional). Seeds not in
-// the pool yet are added; seeds already in it set their franchise.
+// Order (it's the movies' rank): data/curation.json's curated list first,
+// then new seeds, then TMDB's most-voted movies. From the curation: the
+// hand-tuned vibes (vibeSource "hand") and hand-set franchises. Everything
+// else — title, year, rating, runtime, genres, director, cast and crew,
+// plot, poster, backdrop, trailer, age rating — comes from TMDB, and every
+// other movie's vibe is estimated, learnt from the hand-tuned ones.
 //
-// Reads TMDB_READ_TOKEN (or TMDB_API_KEY) from .env. Restart the server
-// afterwards; the app picks up the new catalog on its next start.
+// data/seed-movies.txt: one movie per line as Title|Year|Franchise|imdbId
+// (franchise and IMDb id optional). Seeds not in the pool yet are added;
+// seeds already in it set their franchise.
 //
-// Every movie is keyed by its TMDB id. What's curated is kept: hand-tuned
-// vibes (vibeSource "hand"), franchise tags, rank order and the Reels clips.
-// Everything else — title, year, rating, runtime, genres, director, cast,
-// plot, poster, backdrop, trailer, age rating — comes from TMDB. Movies
-// added with --grow get an estimated vibe, learnt from the hand-tuned ones.
-//
-// A catalog from before TMDB (ids like "m42") is converted through each
-// movie's IMDb id. TMDB answers are kept in data/tmdb-cache.json (not
-// committed), so a re-run only asks about what it hasn't seen.
+// Reads TMDB_READ_TOKEN (or TMDB_API_KEY) from .env, and DATABASE_PATH like
+// the server. TMDB's answers are kept in data/tmdb-cache.json (not
+// committed), so a re-run only asks about what it hasn't seen. Restart the
+// server afterwards — it reads the pool once.
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import config from "../src/config.js";
+import { closeDatabase, openDatabase, writePool } from "../src/db/index.js";
 import { tmdbConfigured, tmdbGet } from "../src/lib/tmdb.js";
 import { toMovie, trainVibes } from "../src/lib/tmdbMovies.js";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const CATALOG = path.join(ROOT, "data", "catalog.json");
 const CACHE = path.join(ROOT, "data", "tmdb-cache.json");
-const ID_MAP = path.join(ROOT, "data", "id-map.json");
 const SEEDS = path.join(ROOT, "data", "seed-movies.txt");
-// --grow: only well-known movies (TMDB vote count), and real feature films.
-const GROW_MIN_VOTES = 1000;
+// Growing: only well-known movies (TMDB vote count), and real feature films.
+// 500+ votes is about 8,000 movies on TMDB.
+const GROW_MIN_VOTES = 500;
 const MIN_RUNTIME = 40;
 
 const argValue = (name) => {
@@ -41,18 +44,16 @@ const argValue = (name) => {
   return at > -1 ? process.argv[at + 1] : undefined;
 };
 const OFFLINE = process.argv.includes("--offline");
-const GROW = Number(argValue("--grow") ?? 0);
+const GROW = argValue("--grow") === undefined ? Infinity : Number(argValue("--grow"));
 
 if (!OFFLINE && !tmdbConfigured()) {
   console.error("Set TMDB_READ_TOKEN (or TMDB_API_KEY) in .env first.");
   process.exit(1);
 }
 
-const catalog = JSON.parse(fs.readFileSync(CATALOG, "utf8"));
+const curation = JSON.parse(fs.readFileSync(config.curationPath, "utf8"));
 const cache = fs.existsSync(CACHE) ? JSON.parse(fs.readFileSync(CACHE, "utf8")) : {};
 const saveCache = () => fs.writeFileSync(CACHE, JSON.stringify(cache) + "\n");
-
-const isTmdbId = (id) => /^\d+$/.test(String(id));
 
 // ---- TMDB, through the cache ---------------------------------------------------------
 
@@ -69,7 +70,12 @@ const findByImdb = async (imdbId) => {
 // No (right) IMDb id: the TMDB movie with this exact title, released that
 // year (or a year either side).
 const normalize = (text) =>
-  String(text ?? "").normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+  String(text ?? "")
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
 // Titles are compared loosely: no leading "the/a/an", no "Episode IV -",
 // and a subtitle on either side is fine ("Glass Onion" is TMDB's "Glass
 // Onion: A Knives Out Mystery"). The year must be within one.
@@ -159,55 +165,36 @@ const eachInParallel = async (items, work, label) => {
   saveCache();
 };
 
-// ---- 1. Every pool movie, by TMDB id ---------------------------------------------------
+// ---- 1. The curated list --------------------------------------------------------------
 
-console.log(`Pool: ${catalog.movies.length} movies${OFFLINE ? " (offline: cache only)" : ""}`);
-const tmdbIdOf = new Map(); // old id → TMDB id
-await eachInParallel(
-  catalog.movies,
-  async (movie) => {
-    const tmdbId = isTmdbId(movie.id)
-      ? Number(movie.id)
-      : (movie.details?.tmdbId ??
-        (movie.details?.imdbId ? await findByImdb(movie.details.imdbId) : null) ??
-        (await findByTitle(movie.title, movie.year)));
-    if (tmdbId) {
-      tmdbIdOf.set(movie.id, tmdbId);
-      await fetchRecord(tmdbId);
-    }
-  },
-  (movie) => `${movie.title} (${movie.year})`,
-);
+console.log(`Curated: ${curation.movies.length} movies${OFFLINE ? " (offline: cache only)" : ""}`);
+await eachInParallel(curation.movies, (entry) => fetchRecord(entry.id), (entry) => entry.title);
 
-// Curated parts first, so the estimate for new movies learns from the
-// hand-tuned vibes against TMDB's own numbers.
+// The hand-tuned vibes first: every other movie's is estimated from them.
+const handTuned = curation.movies
+  .filter((entry) => entry.vibe && cache[`movie:${entry.id}`])
+  .map((entry) => ({ ...toMovie(cache[`movie:${entry.id}`]), vibe: entry.vibe }));
+trainVibes(handTuned, curation.themes);
+
 const pool = [];
 const seen = new Set();
 const dropped = [];
-const idMap = {};
-for (const movie of [...catalog.movies].sort((a, b) => a.rank - b.rank)) {
-  const tmdbId = tmdbIdOf.get(movie.id);
-  const record = tmdbId ? cache[`movie:${tmdbId}`] : null;
-  if (!record || record.adult || seen.has(String(tmdbId))) {
-    dropped.push(`${movie.title} (${movie.year})`);
+for (const entry of curation.movies) {
+  const record = cache[`movie:${entry.id}`];
+  if (!record || record.adult || seen.has(entry.id)) {
+    dropped.push(entry.title);
     continue;
   }
-  seen.add(String(tmdbId));
+  seen.add(entry.id);
   const fresh = toMovie(record);
-  idMap[movie.id] = fresh.id;
   pool.push({
     ...fresh,
     rank: pool.length + 1,
-    // Kept from the curated catalog.
-    franchise: movie.franchise ?? fresh.franchise,
-    vibe: movie.vibe ?? fresh.vibe,
-    vibeSource: movie.vibeSource === "hand" ? "hand" : "estimated",
+    franchise: entry.franchise ?? fresh.franchise,
+    vibe: entry.vibe ?? fresh.vibe,
+    vibeSource: entry.vibe ? "hand" : "estimated",
   });
 }
-trainVibes(
-  pool.filter((movie) => movie.vibeSource === "hand"),
-  catalog.themes,
-);
 
 // ---- 2. Seeds: data/seed-movies.txt -------------------------------------------------------
 
@@ -258,13 +245,13 @@ for (const seed of seeds) {
   seeded += 1;
 }
 
-// ---- 3. --grow: TMDB's most-voted movies not in the pool yet -----------------------------
+// ---- 3. TMDB's most-voted movies not in the pool yet -------------------------------------
 
 let grown = 0;
 if (GROW > 0) {
   const candidates = [];
   for (let page = 1; candidates.length < GROW && page <= 500; page += 1) {
-    const key = `discover:${page}`;
+    const key = `discover:${GROW_MIN_VOTES}:${page}`;
     if (!(key in cache)) {
       if (OFFLINE) break;
       const data = await tmdbGet("/discover/movie", {
@@ -276,12 +263,13 @@ if (GROW > 0) {
       cache[key] = (data?.results ?? []).map((movie) => movie.id);
       if ((data?.results ?? []).length === 0) break;
     }
+    if (cache[key].length === 0) break;
     for (const id of cache[key]) {
       if (!seen.has(String(id)) && !candidates.includes(id)) candidates.push(id);
     }
   }
   const adding = candidates.slice(0, GROW);
-  console.log(`Growing: ${adding.length} candidates`);
+  console.log(`Growing: ${adding.length} of TMDB's most-voted movies`);
   await eachInParallel(adding, fetchRecord, (id) => `TMDB ${id}`);
   for (const id of adding) {
     const record = cache[`movie:${id}`];
@@ -295,37 +283,23 @@ if (GROW > 0) {
   }
 }
 
-// ---- 4. Write it ------------------------------------------------------------------------
+// ---- 4. Into the database ------------------------------------------------------------------
 
-const reelClips = catalog.reelClips
-  .map((clip) => ({ ...clip, movieId: isTmdbId(clip.movieId) ? clip.movieId : idMap[clip.movieId] }))
-  .filter((clip) => clip.movieId && seen.has(clip.movieId));
-
-const output = {
-  generatedAt: new Date().toISOString(),
-  source: "TMDB",
-  movies: pool.map(({ vibeSource, ...movie }) => ({ ...movie, vibeSource })),
-  reelClips,
-  clipSeconds: catalog.clipSeconds,
-  dimensions: catalog.dimensions,
-  themes: catalog.themes,
-};
-fs.writeFileSync(CATALOG, JSON.stringify(output, null, 1) + "\n");
-if (Object.keys(idMap).some((id) => !isTmdbId(id))) {
-  fs.writeFileSync(ID_MAP, JSON.stringify(idMap, null, 1) + "\n");
-}
+openDatabase();
+writePool(pool);
+closeDatabase();
 
 const count = (test) => pool.filter(test).length;
-console.log(`\nPool: ${pool.length} movies (${seeded} new from seeds, ${grown} grown).`);
+console.log(`\nPool: ${pool.length} movies in ${config.databasePath} (${seeded} new from seeds, ${grown} grown).`);
 console.log(
   `  hand-tuned vibes ${count((movie) => movie.vibeSource === "hand")} · ` +
     `trailers ${count((movie) => movie.details?.trailer)} · ` +
-    `backdrops ${count((movie) => movie.backdrop)} · Reels clips ${reelClips.length}`,
+    `backdrops ${count((movie) => movie.backdrop)}`,
 );
 if (dropped.length > 0) {
-  console.log(`  Dropped (not on TMDB, or twice): ${dropped.length} — ${dropped.slice(0, 8).join(", ")}${dropped.length > 8 ? "…" : ""}`);
+  console.log(`  Curated but not on TMDB any more: ${dropped.length} — ${dropped.slice(0, 8).join(", ")}${dropped.length > 8 ? "…" : ""}`);
 }
 if (notFound.length > 0) {
   console.log(`  Seeds TMDB couldn't find (${notFound.length}) — add an IMDb id as the 4th column: ${notFound.slice(0, 8).join(", ")}${notFound.length > 8 ? "…" : ""}`);
 }
-console.log("Restart the server to serve it.");
+console.log("Restart the server to use it.");

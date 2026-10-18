@@ -1,5 +1,6 @@
 import { all, fromJSON, get, run } from "../db/index.js";
-import { moviesOutsidePool } from "./movies.js";
+import { attachCollections, getPersonalCollections } from "./collections.js";
+import { moviesFor } from "./movies.js";
 import { toProfile, getUserRow } from "./users.js";
 
 // Serializers and reads for a user's own data, in the same shapes the app's
@@ -127,9 +128,24 @@ export const libraryMovieIds = (library) => [
   library.pickedMovie,
 ];
 
+// What GET /api/me/library (and GET /api/me) send with the library:
+// `movies` — every movie in it (and `extraIds`'s), since the app has no
+// catalog of its own — and `collections`, the ones you've started or
+// unlocked (lib/collections.js), with cards for the first few films of
+// each (the app counts from movieIds and fetches the rest when it shows
+// them). The library is refetched after every watch, so they keep up.
+export const libraryExtras = (library, extraIds = []) =>
+  attachCollections(
+    moviesFor([...libraryMovieIds(library), ...extraIds]),
+    getPersonalCollections(
+      library.watched.map((entry) => entry.movieId),
+      library.unlockedCollections,
+    ),
+  );
+
 // Everything the app keeps locally, in one response — what the app loads
-// on sign-in to hydrate its stores. `movies`: the ones in it that aren't in
-// the pool (found with search, say), so the app can show them.
+// on sign-in to hydrate its stores. `movies`: every movie in it, and
+// `collections`: yours (see libraryResponse).
 export const getFullState = (userId) => {
   const state = getUserState(userId);
   const profile = toProfile(getUserRow(userId));
@@ -145,8 +161,7 @@ export const getFullState = (userId) => {
     challenges,
     taste,
     recentSearches: fromJSON(state.recent_searches, []),
-    movies: moviesOutsidePool([
-      ...libraryMovieIds(library),
+    ...libraryExtras(library, [
       ...boards.flatMap((board) => board.movieIds),
       ...profile.topTen,
       ...[challenges.activeChallenge, ...challenges.history]
