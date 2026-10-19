@@ -125,6 +125,22 @@ export const writePool = (movies) =>
 
 export const poolSize = () => get("SELECT COUNT(*) AS n FROM movies WHERE in_pool = 1").n;
 
+// The sagas, as build-pool resolved them (lib/collections.js reads them).
+export const writeSagas = (sagas) =>
+  transaction(() => {
+    run("DELETE FROM sagas");
+    sagas.forEach((saga, position) =>
+      run("INSERT INTO sagas (id, position, definition) VALUES (?, ?, ?)", [
+        saga.id,
+        position,
+        toJSON(saga),
+      ]),
+    );
+  });
+
+export const readSagas = () =>
+  all("SELECT definition FROM sagas ORDER BY position").map((row) => fromJSON(row.definition));
+
 // schema.sql only creates what's missing, so a column added to an existing
 // table after a database was created is added here.
 const migrate = () => {

@@ -27,7 +27,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import config from "../src/config.js";
-import { closeDatabase, openDatabase, writePool } from "../src/db/index.js";
+import { closeDatabase, openDatabase, writePool, writeSagas } from "../src/db/index.js";
 import { tmdbConfigured, tmdbGet } from "../src/lib/tmdb.js";
 import { MOVIE_PARAMS, toMovie, trainVibes } from "../src/lib/tmdbMovies.js";
 
@@ -293,14 +293,228 @@ if (GROW > 0) {
   }
 }
 
-// ---- 4. Into the database ------------------------------------------------------------------
+// ---- 4. Sagas: data/curation.json's hand-made collections ---------------------------
+//
+// Each saga's `from` becomes its films (released ones only, oldest first),
+// every one of them added to the pool if it isn't in yet; its ranks become
+// film counts; and it gets its artwork (the franchise's backdrop, or the
+// director's / actor's photo, or its best-known film's backdrop).
+
+const today = new Date().toISOString().slice(0, 10);
+const released = (date) => Boolean(date) && date <= today;
+const DOCUMENTARY = 99;
+// An actor's saga: lead roles only (billed in the top three) in films
+// people know.
+const LEAD_ORDER = 2;
+const ACTOR_MIN_VOTES = 1500;
+const DIRECTOR_MIN_VOTES = 500;
+const MIN_SAGA_SIZE = 3;
+
+const cached = async (key, fetch) => {
+  if (key in cache) return cache[key];
+  if (OFFLINE) return undefined;
+  cache[key] = await fetch();
+  return cache[key];
+};
+
+const tmdbCollection = (id) =>
+  cached(`collection:${id}`, async () => {
+    const data = await tmdbGet(`/collection/${id}`, { language: "en-US" });
+    return (
+      data && {
+        name: data.name,
+        backdrop: data.backdrop_path ?? null,
+        parts: (data.parts ?? []).map(({ id: part, release_date, adult }) => ({ id: part, release_date, adult })),
+      }
+    );
+  });
+
+const findPerson = (name) =>
+  cached(`person:${name.toLowerCase()}`, async () => {
+    const data = await tmdbGet("/search/person", { query: name, include_adult: "false" });
+    const person = (data?.results ?? []).find((result) => result.name.toLowerCase() === name.toLowerCase());
+    return person ? { id: person.id, name: person.name, photo: person.profile_path ?? null } : null;
+  });
+
+const credits = (personId) =>
+  cached(`credits:${personId}`, async () => {
+    const data = await tmdbGet(`/person/${personId}/movie_credits`, { language: "en-US" });
+    const slim = ({ id, order, job, character, vote_count, release_date, genre_ids, adult }) => ({
+      id, order, job, character, vote_count, release_date, genre_ids, adult,
+    });
+    return data && { cast: (data.cast ?? []).map(slim), crew: (data.crew ?? []).map(slim) };
+  });
+
+const companyFilms = (companyId, minVotes) =>
+  cached(`company:${companyId}:${minVotes}`, async () => {
+    const ids = [];
+    for (let page = 1; page <= 5; page += 1) {
+      const data = await tmdbGet("/discover/movie", {
+        with_companies: companyId,
+        "vote_count.gte": minVotes,
+        "with_runtime.gte": MIN_RUNTIME,
+        sort_by: "primary_release_date.asc",
+        include_adult: "false",
+        page,
+      });
+      ids.push(...(data?.results ?? []).filter((movie) => released(movie.release_date)).map((movie) => movie.id));
+      if (page >= (data?.total_pages ?? 0)) break;
+    }
+    return ids;
+  });
+
+// A person's films for a saga: the credits that count — the best-known
+// `top` of them — oldest first.
+const pickCredits = (list, { minVotes, top }) =>
+  list
+    .filter(
+      (credit) =>
+        !credit.adult &&
+        released(credit.release_date) &&
+        (credit.vote_count ?? 0) >= minVotes &&
+        !(credit.genre_ids ?? []).includes(DOCUMENTARY),
+    )
+    .filter((credit, i, all) => all.findIndex((other) => other.id === credit.id) === i)
+    .sort((a, b) => (b.vote_count ?? 0) - (a.vote_count ?? 0))
+    .slice(0, top ?? Infinity)
+    // Then oldest first, like every saga.
+    .sort((a, b) => a.release_date.localeCompare(b.release_date))
+    .map((credit) => credit.id);
+
+// → { ids, art, source } — `source` says what it resolved to, for the log.
+const resolveSaga = async ({ from }) => {
+  if (from.tmdbCollections) {
+    const found = await Promise.all(from.tmdbCollections.map(tmdbCollection));
+    const parts = found
+      .filter(Boolean)
+      .flatMap((collection) => collection.parts)
+      .filter((part) => !part.adult && released(part.release_date))
+      .sort((a, b) => a.release_date.localeCompare(b.release_date));
+    const backdrop = found.find((collection) => collection?.backdrop)?.backdrop;
+    return {
+      ids: parts.map((part) => part.id),
+      art: backdrop ? { backdrop: `https://image.tmdb.org/t/p/w1280${backdrop}` } : null,
+      source: found.map((collection) => collection?.name ?? "?").join(" + "),
+    };
+  }
+  if (from.movies) {
+    const ids = [];
+    const missing = [];
+    for (const line of from.movies) {
+      const [title, year] = line.split("|");
+      const id = await findByTitle(title, Number(year));
+      if (id) ids.push(id);
+      else missing.push(line);
+    }
+    return { ids, art: null, source: `${ids.length} listed${missing.length ? `, not found: ${missing.join(", ")}` : ""}` };
+  }
+  if (from.company) {
+    return { ids: (await companyFilms(from.company, from.minVotes ?? 300)) ?? [], art: null, source: `company ${from.company}` };
+  }
+  const name = from.director ?? from.actor;
+  if (name) {
+    const person = await findPerson(name);
+    const list = person ? await credits(person.id) : null;
+    if (!list) return { ids: [], art: null, source: `${name}: not found` };
+    const ids = from.director
+      ? pickCredits(list.crew.filter((credit) => credit.job === "Director"), {
+          minVotes: from.minVotes ?? DIRECTOR_MIN_VOTES,
+          top: from.top,
+        })
+      : pickCredits(
+          list.cast.filter(
+            (credit) => (credit.order ?? 99) <= LEAD_ORDER && !/\bhimself\b|\bherself\b|uncredited/i.test(credit.character ?? ""),
+          ),
+          { minVotes: from.minVotes ?? ACTOR_MIN_VOTES, top: from.top },
+        );
+    return {
+      ids,
+      art: person.photo ? { photo: `https://image.tmdb.org/t/p/h632${person.photo}` } : null,
+      source: person.name,
+    };
+  }
+  return { ids: [], art: null, source: "no `from`" };
+};
+
+// Rank thresholds as film counts: `at` a count (or "all"), `share` a part of
+// the whole. Rising, one per count — a smaller saga keeps its higher ranks.
+const resolveRanks = (ranks, total) => {
+  const counts = ranks.map((rank) => ({
+    title: rank.title,
+    at:
+      rank.at === "all"
+        ? total
+        : rank.share != null
+          ? Math.max(1, Math.ceil(rank.share * total))
+          : Math.min(rank.at, total),
+  }));
+  return counts.filter(
+    (rank, i) => counts.slice(i + 1).every((later) => later.at > rank.at) && (i === 0 || rank.at > 0),
+  );
+};
+
+const sagaPlan = curation.sagas ?? [];
+console.log(`Sagas: ${sagaPlan.length}`);
+const resolvedSagas = [];
+for (const saga of sagaPlan) {
+  try {
+    resolvedSagas.push({ saga, ...(await resolveSaga(saga)) });
+  } catch (error) {
+    console.warn(`  ${saga.title}: ${error.message} — skipped`);
+  }
+}
+// Their films, into the pool.
+const sagaMovieIds = [...new Set(resolvedSagas.flatMap((entry) => entry.ids.map(String)))];
+await eachInParallel(sagaMovieIds.filter((id) => !seen.has(id)), fetchRecord, (id) => `TMDB ${id}`);
+let sagaAdded = 0;
+for (const id of sagaMovieIds) {
+  if (seen.has(id)) continue;
+  const record = cache[`movie:${id}`];
+  if (!record || record.adult || !record.poster_path) continue;
+  pool.push({ ...toMovie(record), rank: pool.length + 1 });
+  seen.add(id);
+  sagaAdded += 1;
+}
+const poolById = new Map(pool.map((movie) => [movie.id, movie]));
+const sagas = [];
+for (const { saga, ids, art, source } of resolvedSagas) {
+  const movieIds = ids.map(String).filter((id) => poolById.has(id));
+  if (movieIds.length < MIN_SAGA_SIZE) {
+    console.warn(`  ${saga.title}: only ${movieIds.length} films (${source}) — left out`);
+    continue;
+  }
+  const ranks = resolveRanks(saga.ranks, movieIds.length);
+  // Without its own artwork: the backdrop of its best-known film.
+  const fallback = movieIds
+    .map((id) => poolById.get(id))
+    .filter((movie) => movie.backdrop)
+    .sort((a, b) => (b.details?.votes ?? 0) - (a.details?.votes ?? 0))[0]?.backdrop;
+  sagas.push({
+    id: `saga-${saga.id}`,
+    type: "saga",
+    kind: saga.kind,
+    title: saga.title,
+    subtitle: saga.subtitle,
+    movieIds,
+    ranks,
+    art: art ?? (fallback ? { backdrop: fallback } : null),
+  });
+  console.log(
+    `  ${saga.title.padEnd(24)} ${String(movieIds.length).padStart(2)} films · ${ranks.map((rank) => `${rank.title} ${rank.at}`).join(" → ")}   (${source})`,
+  );
+}
+
+// ---- 5. Into the database ------------------------------------------------------------------
 
 openDatabase();
 writePool(pool);
+writeSagas(sagas);
 closeDatabase();
 
 const count = (test) => pool.filter(test).length;
-console.log(`\nPool: ${pool.length} movies in ${config.databasePath} (${seeded} new from seeds, ${grown} grown).`);
+console.log(
+  `\nPool: ${pool.length} movies in ${config.databasePath} (${seeded} new from seeds, ${grown} grown, ${sagaAdded} for sagas). Sagas: ${sagas.length}.`,
+);
 console.log(
   `  hand-tuned vibes ${count((movie) => movie.vibeSource === "hand")} · ` +
     `trailers ${count((movie) => movie.details?.trailer)} · ` +

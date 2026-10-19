@@ -1,26 +1,29 @@
+import { readSagas } from "../db/index.js";
 import { getAllMovies, getMovieById } from "./movies.js";
 
-// Collections — a franchise, a director's films, an actor's films, the best
-// of a decade or a genre — worked out from the pool (lib/movies.js),
-// the same way the app used to work them out from the catalog it
-// downloaded. The app no longer has the pool, so it gets collections from
-// here, as definitions: { id, type, title, movieIds }. XP (lib/xp.js) counts
-// finished collections from the same definitions, so the app's instant XP
-// and the server's agree.
+// Collections, as definitions the app gets: { id, type, title, movieIds }.
+// XP (lib/xp.js) counts from the same definitions, so the app's instant XP
+// and the server's agree. Two kinds:
 //
-// The rules:
-//   franchise, director   2+ pool films
-//   actor                 3+ pool films in the top-billed cast
-//   decade, genre         every one, trimmed to the 15 best-ranked films
-//                         ("Best of the 1990s") when there are more
-// Ids are `${type}-${slugify(title)}`, as the app has always named them.
+//   sagas    THE collections — the hand-made ones in data/curation.json
+//            ("Potterhead", "Assembled", "King of the World"…), turned into
+//            films by `npm run build-pool`. Each also has a `kind`
+//            (franchise / studio / theme / director / actor), a `subtitle`,
+//            `ranks` ([{ title, at }], `at` a film count — you climb them as
+//            you watch) and `art` ({ backdrop } or { photo }). They're what
+//            Library, Home, badges, trophies and XP count.
+//   lists    worked out from the pool, for browsing only ("More from
+//            Christopher Nolan"): franchises (3+ films), directors (2+),
+//            actors (3+ top-billed), decades and genres (trimmed to the 15
+//            best-ranked: "Best of the 1990s"). Never achievements.
+// List ids are `${type}-${slugify(title)}`, as the app has always named
+// them; sagas' are `saga-${id}`.
 
+const MIN_FRANCHISE_SIZE = 3;
 const MIN_COLLECTION_SIZE = 2;
 const MIN_ACTOR_COLLECTION_SIZE = 3;
 const CURATED_SIZE = 15;
-// Only finished franchises, directors and actors of 3+ films earn XP.
-export const XP_COLLECTION_TYPES = ["franchise", "director", "actor"];
-export const XP_COLLECTION_MIN_SIZE = 3;
+export const SAGA = "saga";
 
 export const slugify = (value) =>
   String(value)
@@ -58,9 +61,9 @@ const curated = (type, label, bestOfLabel, movies) => {
   return define(type, trimmed ? bestOfLabel : label, trimmed ? sorted.slice(0, CURATED_SIZE) : sorted);
 };
 
-const build = (movies) => {
+const build = (movies, sagas) => {
   const franchise = [...groupBy(movies, (movie) => movie.franchise).entries()]
-    .filter(([, list]) => list.length >= MIN_COLLECTION_SIZE)
+    .filter(([, list]) => list.length >= MIN_FRANCHISE_SIZE)
     .map(([name, list]) => define("franchise", name, [...list].sort(byYear)));
   const director = [...groupBy(movies, (movie) => movie.director).entries()]
     .filter(([, list]) => list.length >= MIN_COLLECTION_SIZE)
@@ -76,12 +79,13 @@ const build = (movies) => {
     .filter(([, list]) => list.length >= MIN_COLLECTION_SIZE)
     .map(([label, list]) => curated("genre", label, `Best of ${label}`, list));
 
-  // Two names can slug the same; the first keeps the id.
+  // Two names can slug the same; the first keeps the id. Sagas first.
   const byId = new Map();
-  [...franchise, ...director, ...actor, ...decade, ...genre].forEach((collection) => {
+  [...sagas, ...franchise, ...director, ...actor, ...decade, ...genre].forEach((collection) => {
     if (!byId.has(collection.id)) byId.set(collection.id, collection);
   });
   const all = [...byId.values()];
+  const sagaList = all.filter((collection) => collection.type === SAGA);
   const byMovie = new Map();
   all.forEach((collection) =>
     collection.movieIds.forEach((id) => {
@@ -89,56 +93,51 @@ const build = (movies) => {
       byMovie.get(id).push(collection);
     }),
   );
-  return { all, byId, byMovie };
+  return { all, byId, byMovie, sagas: sagaList };
 };
 
-// The pool doesn't change while the server runs, so they're built once.
+// The pool and the sagas don't change while the server runs, so they're
+// built once. Sagas whose films aren't all in the pool any more lose those
+// films (the pool was rebuilt without them).
 let built = null;
 const collections = () => {
-  built ??= build(getAllMovies());
+  if (!built) {
+    const movies = getAllMovies();
+    const inPool = new Set(movies.map((movie) => movie.id));
+    const sagas = readSagas()
+      .map((saga) => ({ ...saga, movieIds: saga.movieIds.filter((id) => inPool.has(id)) }))
+      .filter((saga) => saga.movieIds.length > 0);
+    built = build(movies, sagas);
+  }
   return built;
 };
+
+export const getSagas = () => collections().sagas;
+
+// The ranks reached with `watchedCount` of a saga's films: [{ title, at }].
+export const ranksReached = (saga, watchedCount) =>
+  (saga.ranks ?? []).filter((rank) => watchedCount >= rank.at);
 
 export const getCollection = (id) => collections().byId.get(id) ?? null;
 
 export const getCollectionsForMovie = (movieId) => collections().byMovie.get(movieId) ?? [];
 
-// Every franchise, director and actor collection (3+ films) these watched
-// movies finish — a profile's trophies.
+// The sagas these watched movies finish — a profile's trophies.
 export const getFinishedCollections = (watchedIds) => {
   const watched = new Set(watchedIds);
-  const found = new Map();
-  watched.forEach((movieId) =>
-    getCollectionsForMovie(movieId).forEach((collection) => {
-      if (
-        XP_COLLECTION_TYPES.includes(collection.type) &&
-        collection.movieIds.length >= XP_COLLECTION_MIN_SIZE &&
-        collection.movieIds.every((id) => watched.has(id))
-      ) {
-        found.set(collection.id, collection);
-      }
-    }),
-  );
-  return [...found.values()];
+  return getSagas().filter((saga) => saga.movieIds.every((id) => watched.has(id)));
 };
 
-// The ones finishing earns XP for, as lists of movie ids.
+// What XP counts: every saga's films and rank thresholds.
 export const getXPCollections = () =>
-  collections()
-    .all.filter(
-      (collection) =>
-        XP_COLLECTION_TYPES.includes(collection.type) &&
-        collection.movieIds.length >= XP_COLLECTION_MIN_SIZE,
-    )
-    .map((collection) => collection.movieIds);
+  getSagas().map((saga) => ({ movieIds: saga.movieIds, ranks: saga.ranks.map((rank) => rank.at) }));
 
 // ---- What the app gets -------------------------------------------------------------
 
-// Yours: every collection you've unlocked, and the ones you've started —
-// with a franchise, decade or genre one film is a start; with a director
-// or an actor it takes two (everyone's seen one film by hundreds of them).
-// Every finished collection is in here, and so is every one a single watch
-// could finish, so the app's XP for a watch agrees with the server's.
+// Yours: every saga you've started (one film is a start) or chosen to
+// track, and any other collection you've chosen to track. Every saga with a
+// film watched is in here, so the app's XP for a watch agrees with the
+// server's.
 export const getPersonalCollections = (watchedIds, unlockedIds = []) => {
   const watched = new Set(watchedIds);
   const found = new Map();
@@ -146,44 +145,14 @@ export const getPersonalCollections = (watchedIds, unlockedIds = []) => {
     const collection = getCollection(id);
     if (collection) found.set(id, collection);
   });
-  const counts = new Map();
-  watched.forEach((movieId) =>
-    getCollectionsForMovie(movieId).forEach((collection) =>
-      counts.set(collection, (counts.get(collection) ?? 0) + 1),
-    ),
-  );
-  counts.forEach((count, collection) => {
-    const needed = collection.type === "director" || collection.type === "actor" ? 2 : 1;
-    if (count >= needed) found.set(collection.id, collection);
-  });
+  getSagas()
+    .filter((saga) => saga.movieIds.some((id) => watched.has(id)))
+    .forEach((saga) => found.set(saga.id, saga));
   return [...found.values()];
 };
 
-// To browse and to suggest from: the best-known franchises, directors and
-// actors (by their films' TMDB votes), and every decade and genre.
-const FEATURED_PER_TYPE = 30;
-const votesOf = (collection) =>
-  collection.movieIds.reduce((sum, id) => sum + (getMovieById(id)?.details?.votes ?? 0), 0);
-let featured = null;
-export const getFeaturedCollections = () => {
-  if (!featured) {
-    const { all } = collections();
-    const top = (type) =>
-      all
-        .filter((collection) => collection.type === type)
-        .map((collection) => ({ collection, votes: votesOf(collection) }))
-        .sort((a, b) => b.votes - a.votes)
-        .slice(0, FEATURED_PER_TYPE)
-        .map(({ collection }) => collection);
-    featured = [
-      ...top("franchise"),
-      ...top("director"),
-      ...top("actor"),
-      ...all.filter((collection) => collection.type === "decade" || collection.type === "genre"),
-    ];
-  }
-  return featured;
-};
+// To browse and to suggest from: every saga, in the curation's order.
+export const getFeaturedCollections = () => getSagas();
 
 // A movie as collections show it: enough for a poster, a title and the
 // collection's own sums — not the plot, vibe or details the movie page and
@@ -226,5 +195,4 @@ export const attachCollections = (movies, list, options) => {
 // For tests: forget what was built (the pool changed).
 export const resetCollections = () => {
   built = null;
-  featured = null;
 };

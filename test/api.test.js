@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { createApp } from "../src/app.js";
-import { all, closeDatabase, get, openDatabase, run, writePool } from "../src/db/index.js";
+import { all, closeDatabase, get, openDatabase, run, writePool, writeSagas } from "../src/db/index.js";
 import { pushTransport } from "../src/lib/push.js";
 import { pruneActivity } from "../src/lib/activity.js";
 import { verifiers } from "../src/lib/social.js";
@@ -15,6 +15,38 @@ const POOL = JSON.parse(
   zlib.gunzipSync(fs.readFileSync(new URL("./fixtures/pool.json.gz", import.meta.url))).toString("utf8"),
 );
 const CATALOG_SIZE = POOL.length;
+// Two sagas for the tests, as build-pool resolves them (the real ones come
+// from data/curation.json and TMDB).
+const SAGAS = [
+  {
+    id: "saga-gothams-guardian",
+    type: "saga",
+    kind: "franchise",
+    title: "Gotham's Guardian",
+    subtitle: "The Dark Knight trilogy",
+    movieIds: ["272", "155", "49026"],
+    ranks: [
+      { title: "Citizen", at: 1 },
+      { title: "Detective", at: 2 },
+      { title: "Gotham's Guardian", at: 3 },
+    ],
+    art: { backdrop: "https://image.tmdb.org/t/p/w1280/gotham.jpg" },
+  },
+  {
+    id: "saga-mind-bender",
+    type: "saga",
+    kind: "director",
+    title: "Mind-Bender",
+    subtitle: "Christopher Nolan's films",
+    movieIds: ["77", "1124", "155", "27205", "157336"],
+    ranks: [
+      { title: "Dreamer", at: 2 },
+      { title: "Architect", at: 4 },
+      { title: "Mind-Bender", at: 5 },
+    ],
+    art: { photo: "https://image.tmdb.org/t/p/h632/nolan.jpg" },
+  },
+];
 
 let server;
 let base;
@@ -29,6 +61,7 @@ before(async () => {
   delete process.env.TMDB_API_KEY;
   openDatabase(":memory:");
   writePool(POOL);
+  writeSagas(SAGAS);
   server = createApp().listen(0);
   await new Promise((resolve) => server.once("listening", resolve));
   base = `http://127.0.0.1:${server.address().port}/api`;
@@ -298,25 +331,24 @@ describe("collections", () => {
     ({ token } = await register("Collector", "collector"));
   });
 
-  test("your library brings the collections you've started, with cards for their films", async () => {
+  test("your library brings the sagas you've started, with cards for their films", async () => {
     await api("POST", "/me/watched", { token, body: { movieId: NOLAN.darkKnight } });
     let library = await api("GET", "/me/library", { token });
     assert.ok(library.body.movies.some((movie) => movie.id === NOLAN.darkKnight && movie.vibe));
     const ids = () => library.body.collections.map((collection) => collection.id);
-    // One film starts a franchise or a decade — a director takes two.
-    assert.ok(ids().includes("franchise-the-dark-knight-trilogy"));
-    assert.ok(!ids().includes("director-christopher-nolan"));
-
-    await api("POST", "/me/watched", { token, body: { movieId: NOLAN.inception } });
-    library = await api("GET", "/me/library", { token });
-    const nolan = library.body.collections.find((collection) => collection.id === "director-christopher-nolan");
-    assert.ok(nolan, "two Nolan films start his collection");
-    assert.equal(nolan.type, "director");
-    assert.ok(nolan.movieIds.includes(NOLAN.prestige));
+    // One film starts a saga. Lists (a director's films, a franchise) are
+    // for browsing — never "yours".
+    assert.ok(ids().includes("saga-gothams-guardian"));
+    assert.ok(ids().includes("saga-mind-bender"));
+    assert.ok(!ids().some((id) => !id.startsWith("saga-")));
+    const saga = library.body.collections.find((collection) => collection.id === "saga-mind-bender");
+    assert.equal(saga.type, "saga");
+    assert.equal(saga.kind, "director");
+    assert.equal(saga.title, "Mind-Bender");
+    assert.deepEqual(saga.ranks.map((rank) => rank.at), [2, 4, 5]);
     const byId = new Map(library.body.movies.map((movie) => [movie.id, movie]));
     // The watched ones in full; the rest as cards (no vibe), enough for a collage.
-    assert.ok(byId.get(NOLAN.inception).vibe);
-    const card = nolan.movieIds.map((id) => byId.get(id)).find((movie) => movie?.partial);
+    const card = saga.movieIds.map((id) => byId.get(id)).find((movie) => movie?.partial);
     assert.ok(card && card.poster && card.title && !card.vibe);
 
     // Unlocked by hand: there even with nothing watched.
@@ -326,19 +358,22 @@ describe("collections", () => {
 
     // GET /me carries the same.
     const me = await api("GET", "/me", { token });
-    assert.ok(me.body.collections.some((collection) => collection.id === "director-christopher-nolan"));
+    assert.ok(me.body.collections.some((collection) => collection.id === "saga-mind-bender"));
     assert.equal(me.body.bucketList, undefined);
   });
 
-  test("featured collections to browse, one collection in full, a movie's own", async () => {
+  test("featured: every saga; lists still open for browsing; a movie's own", async () => {
     const featured = await api("GET", "/collections", { token });
     assert.equal(featured.status, 200);
-    const types = new Set(featured.body.collections.map((collection) => collection.type));
-    for (const type of ["franchise", "director", "actor", "decade", "genre"]) assert.ok(types.has(type), type);
+    assert.deepEqual(
+      featured.body.collections.map((collection) => collection.id),
+      SAGAS.map((saga) => saga.id),
+    );
     assert.ok(featured.body.movies.length > 0);
     const etag = featured.headers.get("etag");
     assert.equal((await api("GET", "/collections", { token, headers: { "if-none-match": etag } })).status, 304);
 
+    // A director's list, for "More from Christopher Nolan".
     const nolan = await api("GET", "/collections/director-christopher-nolan", { token });
     assert.equal(nolan.body.collection.title, "Christopher Nolan");
     assert.deepEqual(
@@ -348,10 +383,15 @@ describe("collections", () => {
     assert.equal((await api("GET", "/collections/director-nobody-at-all", { token })).status, 404);
 
     const inception = await api("GET", `/movies/${NOLAN.inception}`, { token });
-    assert.ok(inception.body.collections.some((collection) => collection.id === "director-christopher-nolan"));
+    const own = inception.body.collections.map((collection) => collection.id);
+    assert.ok(own.includes("saga-mind-bender"));
+    assert.ok(own.includes("director-christopher-nolan"));
+    // No franchise of fewer than 3 films is a collection.
+    const franchises = inception.body.collections.filter((collection) => collection.type === "franchise");
+    assert.ok(franchises.every((collection) => collection.movieIds.length >= 3));
   });
 
-  test("a collection's page: its picture, cards with votes, and friends' progress", async () => {
+  test("a saga's page: its artwork, cards with votes, and friends' progress", async () => {
     const friend = await register("Nolan Friend", "nolanfriend");
     const me = (await api("GET", "/me/profile", { token })).body.profile;
     await api("POST", "/friends/requests", { token: friend.token, body: { userId: me.id } });
@@ -360,9 +400,9 @@ describe("collections", () => {
     await api("POST", "/me/watched", { token: friend.token, body: { movieId: NOLAN.prestige } });
     await api("POST", "/me/watched", { token: friend.token, body: { movieId: "289" } }); // not Nolan's
 
-    const page = await api("GET", "/collections/director-christopher-nolan", { token });
+    const page = await api("GET", "/collections/saga-mind-bender", { token });
     assert.equal(page.status, 200);
-    assert.ok("art" in page.body, "art is there (null when TMDB has no picture)");
+    assert.deepEqual(page.body.art, SAGAS[1].art, "the artwork build-pool picked");
     assert.ok(page.body.movies.every((movie) => typeof movie.votes === "number"));
     assert.equal(page.body.friends.length, 1);
     const [entry] = page.body.friends;
@@ -372,24 +412,48 @@ describe("collections", () => {
 
     // Someone with no friends there sees none.
     const loner = await register("Lone Viewer", "loneviewer");
-    assert.deepEqual((await api("GET", "/collections/director-christopher-nolan", { token: loner.token })).body.friends, []);
+    assert.deepEqual((await api("GET", "/collections/saga-mind-bender", { token: loner.token })).body.friends, []);
 
-    // A friend's profile: their finished collections (trophies), with the
+    // A friend's profile: their finished sagas (trophies), with the
     // definitions to show them.
     for (const movieId of ["155", "272", "49026"]) {
       await api("POST", "/me/watched", { token: friend.token, body: { movieId } });
     }
     const profile = await api("GET", `/users/${friend.user.id}`, { token });
-    assert.ok(profile.body.user.finishedCollections.includes("franchise-the-dark-knight-trilogy"));
-    assert.deepEqual(profile.body.user.pinnedCollections, []);
-    assert.ok(profile.body.collections.some((collection) => collection.id === "franchise-the-dark-knight-trilogy"));
+    assert.deepEqual(profile.body.user.finishedCollections, ["saga-gothams-guardian"]);
+    assert.ok(profile.body.collections.some((collection) => collection.id === "saga-gothams-guardian"));
     // A stranger gets just the public card.
     const strangerView = await api("GET", `/users/${friend.user.id}`, { token: loner.token });
     assert.equal(strangerView.body.user.finishedCollections, undefined);
 
-    // A franchise falls back to one of its films' backdrops.
+    // A franchise list falls back to one of its films' backdrops.
     const franchise = await api("GET", "/collections/franchise-the-dark-knight-trilogy", { token });
     assert.ok(franchise.body.art?.backdrop?.startsWith("https://"));
+  });
+
+  test("every saga rank reached is worth 150 XP — lists earn nothing", async () => {
+    const climber = await register("Rank Climber", "rankclimber");
+    const xp = async () => (await api("GET", "/me/profile", { token: climber.token })).body.profile.xp;
+    await api("POST", "/me/watched", { token: climber.token, body: { movieId: "289" } }); // in no saga
+    const base = await xp();
+    // Each watch below reaches exactly one rank: Batman Begins → Citizen
+    // (Gotham's Guardian, 1 of 3); The Dark Knight → Detective (2 of 3,
+    // and Mind-Bender's first film, short of its first rank at 2);
+    // Inception → Dreamer (Mind-Bender, 2 of 5).
+    const gains = [];
+    let last = base;
+    for (const movieId of ["272", NOLAN.darkKnight, NOLAN.inception]) {
+      await api("POST", "/me/watched", { token: climber.token, body: { movieId } });
+      const now = await xp();
+      gains.push(now - last);
+      last = now;
+    }
+    // A watch is 100, a rank 150, and the rest bonuses: 50 a new genre or
+    // decade, 75 for a third film by one director (Inception, here).
+    for (const gain of gains) {
+      assert.ok(gain >= 100 + 150, `a rank in ${gain}`);
+      assert.equal((gain - 100 - 150) % 25, 0);
+    }
   });
 });
 

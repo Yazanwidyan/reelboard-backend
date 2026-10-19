@@ -31,8 +31,8 @@ const getFeaturedResponse = () => {
   return featuredResponse;
 };
 
-// GET /api/collections — the best-known franchises, directors and actors,
-// and every decade and genre, with cards for the first few films of each.
+// GET /api/collections — every saga, with cards for the first few films of
+// each.
 // Sent with an ETag; send it back as If-None-Match for an empty 304 while
 // nothing changed.
 router.get("/", (req, res) => {
@@ -48,6 +48,8 @@ router.get("/", (req, res) => {
 // nothing found). Cast photos come with the movies; a director's photo and
 // a franchise's artwork are TMDB's, asked for once a week at most.
 const artFor = async (collection) => {
+  // A saga's artwork was picked when the pool was built.
+  if (collection.art) return collection.art;
   const movies = collection.movieIds.map(getMovieById).filter(Boolean);
   try {
     if (collection.type === "actor") {

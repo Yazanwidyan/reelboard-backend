@@ -250,3 +250,13 @@ CREATE TABLE IF NOT EXISTS club_movies (
   added_at INTEGER NOT NULL,
   PRIMARY KEY (club_id, movie_id)
 );
+
+-- The sagas: data/curation.json's hand-made collections, turned into movie
+-- ids, rank thresholds and artwork by `npm run build-pool`. One row each,
+-- in the curation's order; `definition` is the collection as the app gets
+-- it (lib/collections.js).
+CREATE TABLE IF NOT EXISTS sagas (
+  id         TEXT PRIMARY KEY,
+  position   INTEGER NOT NULL,
+  definition TEXT NOT NULL              -- JSON
+);

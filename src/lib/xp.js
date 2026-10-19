@@ -11,7 +11,8 @@ import { getMovieById } from "./movies.js";
 // XP is earned only from what you've watched:
 //   100 per movie · 50 per genre · 50 per decade
 //   75 per director you've seen 3+ films by
-//   200 per finished franchise / director / actor collection of 3+ films
+//   150 per saga rank reached (lib/collections.js — "Prefect", "Hogwarts
+//       Graduate"…)
 //   10 per rated movie
 // Rewatches add nothing; nothing depends on order or dates.
 
@@ -20,7 +21,7 @@ export const NEW_GENRE_XP = 50;
 export const NEW_DECADE_XP = 50;
 export const DIRECTOR_DEPTH_XP = 75;
 export const DIRECTOR_DEPTH_FILMS = 3;
-export const COLLECTION_XP = 200;
+export const RANK_XP = 150;
 export const RATE_XP = 10;
 
 export const decadeOf = (year) => `${Math.floor(year / 10) * 10}s`;
@@ -30,7 +31,7 @@ const isRated = (entry) => entry.tier != null || entry.rating != null;
 
 // `watched`: [{ movieId, tier, rating }]. `catalog`: { lookup, xpCollections }:
 // any movie the server has counts for movies, genres, decades and
-// directors; collections are the pool's (lib/collections.js).
+// directors; `xpCollections` are the sagas, [{ movieIds, ranks: [count] }].
 export const computeXP = (watched, catalog) => {
   const movies = watched
     .map((entry) => catalog.lookup(entry.movieId))
@@ -45,16 +46,17 @@ export const computeXP = (watched, catalog) => {
     (count) => count >= DIRECTOR_DEPTH_FILMS,
   ).length;
   const watchedIds = new Set(watched.map((entry) => entry.movieId));
-  const completed = catalog.xpCollections.filter((ids) =>
-    ids.every((id) => watchedIds.has(id)),
-  ).length;
+  const ranksReached = catalog.xpCollections.reduce((sum, saga) => {
+    const count = saga.movieIds.filter((id) => watchedIds.has(id)).length;
+    return sum + saga.ranks.filter((at) => count >= at).length;
+  }, 0);
 
   return (
     movies.length * WATCH_XP +
     genres.size * NEW_GENRE_XP +
     decades.size * NEW_DECADE_XP +
     deepDirectors * DIRECTOR_DEPTH_XP +
-    completed * COLLECTION_XP +
+    ranksReached * RANK_XP +
     watched.filter(isRated).length * RATE_XP
   );
 };
