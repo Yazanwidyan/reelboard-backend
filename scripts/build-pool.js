@@ -52,6 +52,8 @@ if (!OFFLINE && !tmdbConfigured()) {
 }
 
 const curation = JSON.parse(fs.readFileSync(config.curationPath, "utf8"));
+// Kept out of the pool by hand (the admin site's "remove from pool").
+const excluded = new Set((curation.excluded ?? []).map(String));
 const cache = fs.existsSync(CACHE) ? JSON.parse(fs.readFileSync(CACHE, "utf8")) : {};
 const saveCache = () => fs.writeFileSync(CACHE, JSON.stringify(cache) + "\n");
 
@@ -245,6 +247,7 @@ for (const seed of seeds) {
     if (seed.franchise) byId.get(id).franchise = seed.franchise;
     continue;
   }
+  if (excluded.has(id)) continue;
   const record = cache[`movie:${id}`];
   if (!record || record.adult) continue;
   const movie = { ...toMovie(record), rank: pool.length + 1 };
@@ -275,7 +278,9 @@ if (GROW > 0) {
     }
     if (cache[key].length === 0) break;
     for (const id of cache[key]) {
-      if (!seen.has(String(id)) && !candidates.includes(id)) candidates.push(id);
+      if (!seen.has(String(id)) && !excluded.has(String(id)) && !candidates.includes(id)) {
+        candidates.push(id);
+      }
     }
   }
   const adding = candidates.slice(0, GROW);
@@ -382,7 +387,11 @@ const pickCredits = (list, { minVotes, top }) =>
     .map((credit) => credit.id);
 
 // → { ids, art, source } — `source` says what it resolved to, for the log.
-const resolveSaga = async ({ from }) => {
+const resolveSaga = async ({ from, person: curatedPerson }) => {
+  // Films picked one by one (the admin site saves a saga's films this way).
+  if (from.ids) {
+    return { ids: from.ids.map(Number), art: null, person: curatedPerson ?? null, source: `${from.ids.length} picked` };
+  }
   if (from.tmdbCollections) {
     const found = await Promise.all(from.tmdbCollections.map(tmdbCollection));
     const parts = found
@@ -430,6 +439,8 @@ const resolveSaga = async ({ from }) => {
     return {
       ids,
       art: person.photo ? { photo: `https://image.tmdb.org/t/p/h632${person.photo}` } : null,
+      // Who it's about, so their name on a movie page opens it.
+      person: person.name,
       source: person.name,
     };
   }
@@ -477,7 +488,7 @@ for (const id of sagaMovieIds) {
 }
 const poolById = new Map(pool.map((movie) => [movie.id, movie]));
 const sagas = [];
-for (const { saga, ids, art, source } of resolvedSagas) {
+for (const { saga, ids, art, person, source } of resolvedSagas) {
   const movieIds = ids.map(String).filter((id) => poolById.has(id));
   if (movieIds.length < MIN_SAGA_SIZE) {
     console.warn(`  ${saga.title}: only ${movieIds.length} films (${source}) — left out`);
@@ -498,6 +509,7 @@ for (const { saga, ids, art, source } of resolvedSagas) {
     movieIds,
     ranks,
     art: art ?? (fallback ? { backdrop: fallback } : null),
+    ...(person ? { person } : {}),
   });
   console.log(
     `  ${saga.title.padEnd(24)} ${String(movieIds.length).padStart(2)} films · ${ranks.map((rank) => `${rank.title} ${rank.at}`).join(" → ")}   (${source})`,

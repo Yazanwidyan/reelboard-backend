@@ -255,6 +255,27 @@ The rules:
 - 200 per finished franchise / director / actor collection of 3+ films (the pool's — see Collections)
 - 10 per rated movie
 
+### Admin (signed in, `ADMIN_EMAILS` only)
+The [admin site](../Reelboard-admin) uses these. Every request checks that the account's email is in `ADMIN_EMAILS`, matched case-insensitively. Other accounts get `403`.
+
+Edits to movies and sagas are live, and they're also written to `data/curation.json` (in its own layout, so the git diff shows just the changed lines). That way `npm run build-pool` keeps them. Each one also recomputes everyone's level.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/admin/me` | the admin's own profile |
+| GET | `/api/admin/stats` | accounts (total, new, active), sign-ups per day for 30 days, totals, most watched (30 days) and most S-tiered movies, saga progress |
+| GET | `/api/admin/users` | `?q=&page=&limit=`. Search by name, handle or email. |
+| GET / DELETE | `/api/admin/users/:id` | an account: profile, counts, tiers, recent activity. DELETE removes it (not your own). |
+| GET | `/api/admin/meta` | Taste DNA dimensions and themes, tiers, saga kinds |
+| GET | `/api/admin/movies` | `?q=&scope=pool\|other\|all&vibe=any\|hand\|estimated&page=&limit=` |
+| GET / PATCH | `/api/admin/movies/:id` | Any TMDB movie (fetched if new), with its stats. PATCH `{ vibe?: { dims: [6 × 1–5], themes: [≤3] }, franchise?: string \| null, inPool?: boolean }`. A vibe becomes hand-tuned. `inPool: false` adds the movie to curation's `excluded`. |
+| GET / POST | `/api/admin/sagas` | POST `{ id, title, subtitle?, kind, movieIds (3+), ranks: [{ title, at }] }`. The last rank always needs every film, and films not in the pool join it. |
+| GET / PATCH / DELETE | `/api/admin/sagas/:id` | PATCH any of `title`, `subtitle`, `kind`, `movieIds`, `ranks`. New films are saved to curation as `from: { ids }`. |
+| GET | `/api/admin/clubs` | `?q=`, by club name or owner handle |
+| DELETE | `/api/admin/clubs/:id` | |
+
+The admin site itself is served at `/admin`, from `ADMIN_DIST` (default `../Reelboard-admin/dist`), once it's built.
+
 ## The app and this server
 
 The ReelBoard app requires an account and treats this server as the source of truth. It uses TanStack Query to cache the account on the device (see the app's `src/services/queryClient.js`):

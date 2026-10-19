@@ -78,6 +78,10 @@ export const levelFor = (xp) => {
 // The pool never changes while the server runs, so its collections are
 // worked out once.
 let catalog = null;
+// The pool or the sagas changed (the admin site): work it out again.
+export const resetXPCatalog = () => {
+  catalog = null;
+};
 const getCatalog = () => {
   catalog ??= { lookup: getMovieById, xpCollections: getXPCollections() };
   return catalog;

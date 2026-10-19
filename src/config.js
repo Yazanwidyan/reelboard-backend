@@ -20,8 +20,13 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   // ":memory:" works too — handy for tests.
   databasePath: process.env.DATABASE_PATH ?? path.join(root, "data", "reelboard.db"),
-  // What people chose by hand (the pool itself is in the database).
-  curationPath: path.join(root, "data", "curation.json"),
+  // What people chose by hand (the pool itself is in the database). The
+  // admin site writes it; tests point it at a copy.
+  curationPath: process.env.CURATION_PATH ?? path.join(root, "data", "curation.json"),
+  // Who can use the admin site: these accounts' emails, comma-separated.
+  adminEmails: list(process.env.ADMIN_EMAILS).map((email) => email.toLowerCase()),
+  // The admin site's built files (../Reelboard-admin, `npm run build`).
+  adminDist: process.env.ADMIN_DIST ?? path.join(root, "..", "Reelboard-admin", "dist"),
   jwtSecret: process.env.JWT_SECRET ?? "dev-only-secret-change-me",
   jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? "30d",
   // Comma-separated list, or "*" for any origin (the default; a native app

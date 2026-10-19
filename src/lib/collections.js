@@ -1,4 +1,5 @@
 import { readSagas } from "../db/index.js";
+import { readCuration } from "./curation.js";
 import { getAllMovies, getMovieById } from "./movies.js";
 
 // Collections, as definitions the app gets: { id, type, title, movieIds }.
@@ -100,12 +101,37 @@ const build = (movies, sagas) => {
 // built once. Sagas whose films aren't all in the pool any more lose those
 // films (the pool was rebuilt without them).
 let built = null;
+// Bumped whenever they're rebuilt, so cached responses know they're stale.
+let version = 0;
+export const collectionsVersion = () => version;
+
+// Who an actor's or a director's saga is about ("Al Pacino"), so a movie
+// page can point their name at it. build-pool stores it as `person`; sagas
+// built before that get it from data/curation.json.
+const curatedPeople = () => {
+  try {
+    return new Map(
+      (readCuration().sagas ?? []).map((item) => [
+        `saga-${item.id}`,
+        item.from?.actor ?? item.from?.director ?? item.person ?? null,
+      ]),
+    );
+  } catch {
+    return new Map();
+  }
+};
+
 const collections = () => {
   if (!built) {
     const movies = getAllMovies();
     const inPool = new Set(movies.map((movie) => movie.id));
+    const people = curatedPeople();
     const sagas = readSagas()
-      .map((saga) => ({ ...saga, movieIds: saga.movieIds.filter((id) => inPool.has(id)) }))
+      .map((saga) => ({
+        ...saga,
+        person: saga.person ?? people.get(saga.id) ?? null,
+        movieIds: saga.movieIds.filter((id) => inPool.has(id)),
+      }))
       .filter((saga) => saga.movieIds.length > 0);
     built = build(movies, sagas);
   }
@@ -121,6 +147,12 @@ export const ranksReached = (saga, watchedCount) =>
 export const getCollection = (id) => collections().byId.get(id) ?? null;
 
 export const getCollectionsForMovie = (movieId) => collections().byMovie.get(movieId) ?? [];
+
+// The sagas about any of these people: an actor's, a director's.
+export const getSagasForPeople = (names) => {
+  const wanted = new Set(names.filter(Boolean));
+  return getSagas().filter((saga) => saga.person && wanted.has(saga.person));
+};
 
 // The sagas these watched movies finish — a profile's trophies.
 export const getFinishedCollections = (watchedIds) => {
@@ -192,7 +224,9 @@ export const attachCollections = (movies, list, options) => {
   return { movies: [...movies, ...cards.filter((card) => !have.has(card.id))], collections: definitions };
 };
 
-// For tests: forget what was built (the pool changed).
+// Forget what was built (the pool or the sagas changed — the admin site, or
+// tests).
 export const resetCollections = () => {
   built = null;
+  version += 1;
 };

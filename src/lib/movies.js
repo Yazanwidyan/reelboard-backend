@@ -43,6 +43,12 @@ const rowToMovie = (row) => ({
   fetchedAt: row.fetched_at,
 });
 
+// Forget what's been read (the admin site changed the pool or a movie).
+export const resetMovieCache = () => {
+  pool = null;
+  others.clear();
+};
+
 // The pool, in rank order.
 export const getAllMovies = () => {
   if (!pool) {

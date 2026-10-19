@@ -2,7 +2,12 @@ import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { all } from "../db/index.js";
-import { attachCollections, getCollection, getFeaturedCollections } from "../lib/collections.js";
+import {
+  attachCollections,
+  collectionsVersion,
+  getCollection,
+  getFeaturedCollections,
+} from "../lib/collections.js";
 import { notFound } from "../lib/errors.js";
 import { getMovieById } from "../lib/movies.js";
 import { imageUrl, tmdbGet } from "../lib/tmdb.js";
@@ -19,14 +24,14 @@ const router = Router();
 
 const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
 
-// The pool only changes when the server restarts, so the featured list is
-// serialized and hashed once.
+// Serialized and hashed once per version of the collections (they change
+// when the server restarts, or the admin site edits a saga).
 let featuredResponse = null;
 const getFeaturedResponse = () => {
-  if (!featuredResponse) {
+  if (featuredResponse?.version !== collectionsVersion()) {
     const body = JSON.stringify(attachCollections([], getFeaturedCollections()));
     const hash = crypto.createHash("sha256").update(body).digest("base64url").slice(0, 27);
-    featuredResponse = { body, etag: `"${hash}"` };
+    featuredResponse = { body, etag: `"${hash}"`, version: collectionsVersion() };
   }
   return featuredResponse;
 };

@@ -382,13 +382,12 @@ describe("collections", () => {
     );
     assert.equal((await api("GET", "/collections/director-nobody-at-all", { token })).status, 404);
 
+    // A movie's page brings its sagas only, not the browsing lists.
     const inception = await api("GET", `/movies/${NOLAN.inception}`, { token });
     const own = inception.body.collections.map((collection) => collection.id);
     assert.ok(own.includes("saga-mind-bender"));
-    assert.ok(own.includes("director-christopher-nolan"));
-    // No franchise of fewer than 3 films is a collection.
-    const franchises = inception.body.collections.filter((collection) => collection.type === "franchise");
-    assert.ok(franchises.every((collection) => collection.movieIds.length >= 3));
+    assert.ok(!own.includes("director-christopher-nolan"));
+    assert.ok(inception.body.collections.every((collection) => collection.type === "saga"));
   });
 
   test("a saga's page: its artwork, cards with votes, and friends' progress", async () => {

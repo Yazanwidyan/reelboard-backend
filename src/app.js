@@ -1,12 +1,16 @@
+import fs from "node:fs";
+import path from "node:path";
 import compression from "compression";
 import cors from "cors";
 import express from "express";
 import helmet from "helmet";
 import config from "./config.js";
+import { requireAdmin } from "./middleware/admin.js";
 import { requireAuth } from "./middleware/auth.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { idempotency } from "./middleware/idempotency.js";
 import activityRoutes from "./routes/activity.js";
+import adminRoutes from "./routes/admin.js";
 import authRoutes from "./routes/auth.js";
 import boardRoutes from "./routes/boards.js";
 import challengeRoutes from "./routes/challenges.js";
@@ -27,7 +31,16 @@ export const createApp = () => {
   const app = express();
 
   app.disable("x-powered-by");
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          // The admin site shows TMDB's posters and photos.
+          "img-src": ["'self'", "data:", "https://image.tmdb.org", "https://img.youtube.com"],
+        },
+      },
+    }),
+  );
   // Responses carry movies (candidates are a few hundred KB of JSON); gzipped
   // they're a fraction of that.
   app.use(compression());
@@ -63,6 +76,16 @@ export const createApp = () => {
   app.use("/api/collections", signedIn, collectionRoutes);
   app.use("/api/people", signedIn, peopleRoutes);
   app.use("/api/movie-nights", signedIn, movieNightRoutes);
+
+  // Admins only (ADMIN_EMAILS) — the admin site's API.
+  app.use("/api/admin", requireAuth, requireAdmin, adminRoutes);
+
+  // The admin site itself (../Reelboard-admin, built), at /admin. Its pages
+  // are all index.html; the app routes them.
+  if (fs.existsSync(path.join(config.adminDist, "index.html"))) {
+    app.use("/admin", express.static(config.adminDist, { index: false, maxAge: "1h" }));
+    app.get(/^\/admin(\/.*)?$/, (req, res) => res.sendFile(path.join(config.adminDist, "index.html")));
+  }
 
   app.use(notFoundHandler);
   app.use(errorHandler);
