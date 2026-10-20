@@ -148,6 +148,13 @@ const migrate = () => {
   if (!userColumns.has("has_password")) {
     db.exec("ALTER TABLE users ADD COLUMN has_password INTEGER NOT NULL DEFAULT 1");
   }
+  // Ranks replaced XP (the old `xp` column stays, unused).
+  if (!userColumns.has("ranks")) {
+    db.exec("ALTER TABLE users ADD COLUMN ranks INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!userColumns.has("rank_ids")) {
+    db.exec("ALTER TABLE users ADD COLUMN rank_ids TEXT NOT NULL DEFAULT '[]'");
+  }
 };
 
 // From data/curation.json: the Taste DNA vocabulary and the clip length.

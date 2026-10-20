@@ -2,11 +2,13 @@ import { z } from "zod";
 import { DECADE_RANGES, RUNTIME_RANGES } from "./movies.js";
 
 // Shared building blocks for request validation. Limits match the app's
-// stores (BOARD_NAME_MAX, TOP_TEN_SIZE, MAX_PINNED, bio 140, …).
+// stores (BOARD_NAME_MAX, S_TIER_ORDER_MAX, MAX_PINNED, bio 140, …).
 
 export const TIERS = ["S", "A", "B", "C", "D", "F"];
 export const BOARD_NAME_MAX = 40;
-export const TOP_TEN_SIZE = 10;
+// The order of your S tier (your favourites, #1 first) — as many as you
+// have S films.
+export const S_TIER_ORDER_MAX = 1000;
 export const MAX_PINNED = 3;
 export const BIO_MAX = 140;
 export const MAX_RECENT_SEARCHES = 8;

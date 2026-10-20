@@ -3,8 +3,8 @@ import { readCuration } from "./curation.js";
 import { getAllMovies, getMovieById } from "./movies.js";
 
 // Collections, as definitions the app gets: { id, type, title, movieIds }.
-// XP (lib/xp.js) counts from the same definitions, so the app's instant XP
-// and the server's agree. Two kinds:
+// Ranks (lib/ranks.js) count the sagas from the same definitions, so the
+// app's instant ranks and the server's agree. Two kinds:
 //
 //   sagas    THE collections — the hand-made ones in data/curation.json
 //            ("Potterhead", "Assembled", "King of the World"…), turned into
@@ -160,16 +160,11 @@ export const getFinishedCollections = (watchedIds) => {
   return getSagas().filter((saga) => saga.movieIds.every((id) => watched.has(id)));
 };
 
-// What XP counts: every saga's films and rank thresholds.
-export const getXPCollections = () =>
-  getSagas().map((saga) => ({ movieIds: saga.movieIds, ranks: saga.ranks.map((rank) => rank.at) }));
-
 // ---- What the app gets -------------------------------------------------------------
 
 // Yours: every saga you've started (one film is a start) or chosen to
 // track, and any other collection you've chosen to track. Every saga with a
-// film watched is in here, so the app's XP for a watch agrees with the
-// server's.
+// film watched is in here, so the app's ranks agree with the server's.
 export const getPersonalCollections = (watchedIds, unlockedIds = []) => {
   const watched = new Set(watchedIds);
   const found = new Map();

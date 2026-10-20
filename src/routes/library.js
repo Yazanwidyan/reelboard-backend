@@ -23,7 +23,7 @@ import {
   toLean,
 } from "../lib/movies.js";
 import { collectionId, movieId, tier, timestamp } from "../lib/schemas.js";
-import { updateLevel } from "../lib/xp.js";
+import { updateRanks } from "../lib/ranks.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/me — the app's movieStore, server-side.
@@ -119,8 +119,10 @@ router.post("/watched", validate(markWatchedSchema), async (req, res) => {
     );
     logActivity(req.userId, "watched", { movieId: id });
     if (chosenTier) logActivity(req.userId, "tier", { movieId: id, tier: chosenTier });
-    updateLevel(req.userId);
-    return completeChallengeFor(req.userId, id);
+    // The dare first: finishing one is a rank of its own (Dare Devil).
+    const completed = completeChallengeFor(req.userId, id);
+    updateRanks(req.userId);
+    return completed;
   });
 
   res.status(201).json({ entry: getWatchedEntry(req.userId, id), completedChallenge });
@@ -150,8 +152,6 @@ router.patch(
         ]);
         if (newTier) logActivity(req.userId, "tier", { movieId: id, tier: newTier });
         else retractActivity(req.userId, "tier", id);
-        // Rating (or un-rating) changes XP.
-        updateLevel(req.userId);
       }
       if (watchedAt !== undefined) {
         run("UPDATE watched SET watched_at = ? WHERE user_id = ? AND movie_id = ?", [
@@ -160,6 +160,9 @@ router.patch(
           id,
         ]);
       }
+      // A tier counts (Films tiered, Tough Critic), and so does the day it
+      // was watched (Marathoner).
+      updateRanks(req.userId);
     });
     res.json({ entry: getWatchedEntry(req.userId, id) });
   },
@@ -174,6 +177,8 @@ router.post("/watched/:movieId/rewatch", validate(movieParam, "params"), (req, r
     [Date.now(), req.userId, req.params.movieId],
   );
   if (!changes) throw notFound("You haven't watched this movie");
+  // Comfort Watcher counts rewatches.
+  updateRanks(req.userId);
   res.json({ entry: getWatchedEntry(req.userId, req.params.movieId) });
 });
 
@@ -183,7 +188,7 @@ router.delete("/watched/:movieId", validate(movieParam, "params"), (req, res) =>
     retractActivity(req.userId, "watched", id);
     retractActivity(req.userId, "tier", id);
     run("DELETE FROM watched WHERE user_id = ? AND movie_id = ?", [req.userId, id]);
-    updateLevel(req.userId);
+    updateRanks(req.userId);
   });
   res.status(204).end();
 });
@@ -191,7 +196,7 @@ router.delete("/watched/:movieId", validate(movieParam, "params"), (req, res) =>
 router.delete("/watched", (req, res) => {
   transaction(() => {
     run("DELETE FROM watched WHERE user_id = ?", [req.userId]);
-    updateLevel(req.userId);
+    updateRanks(req.userId);
   });
   res.status(204).end();
 });

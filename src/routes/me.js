@@ -21,11 +21,11 @@ import {
   preferences,
   tier,
   timestamp,
-  TOP_TEN_SIZE,
+  S_TIER_ORDER_MAX,
   uniqueIds,
 } from "../lib/schemas.js";
 import { getUserRow, toProfile } from "../lib/users.js";
-import { updateLevel } from "../lib/xp.js";
+import { updateRanks } from "../lib/ranks.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/me.
@@ -49,9 +49,9 @@ const profileSchema = z
     // A URL, or the app's local file:// URI until avatar upload exists.
     avatarUri: z.string().trim().max(2000).nullable(),
     handle,
-    // XP and level aren't accepted: the server works them out from the
-    // watch history (lib/xp.js). Older apps still send them; they're
-    // dropped like any other unknown field.
+    // Ranks and level aren't accepted: the server works them out from the
+    // watch history (lib/ranks.js). Older apps still send XP and a level;
+    // they're dropped like any other unknown field.
   })
   .partial();
 
@@ -78,10 +78,12 @@ router.patch("/profile", validate(profileSchema), (req, res) => {
   res.json({ profile: toProfile(getUserRow(req.userId)) });
 });
 
-// Your top ten, in rank order (#1 first).
+// The order of your S tier — your favourites, #1 first. (Kept as
+// `top_ten`, its name from before the S tier was your top films.) Films
+// tiered S that aren't in it come after, most recent first.
 router.put(
   "/top-ten",
-  validate(z.object({ movieIds: uniqueIds(movieId, TOP_TEN_SIZE) })),
+  validate(z.object({ movieIds: uniqueIds(movieId, S_TIER_ORDER_MAX) })),
   async (req, res) => {
     const movieIds = (await ensureMovies(req.body.movieIds)).map((movie) => movie.id);
     run("UPDATE users SET top_ten = ? WHERE id = ?", [toJSON(movieIds), req.userId]);
@@ -244,7 +246,7 @@ const importSchema = z.object({
     .object({
       displayName: z.string().trim().min(1).max(50).optional(),
       bio: z.string().optional(),
-      topTen: z.array(movieId).max(TOP_TEN_SIZE).optional(),
+      topTen: z.array(movieId).max(S_TIER_ORDER_MAX).optional(),
       pinnedCollections: z.array(collectionId).max(MAX_PINNED).optional(),
     })
     .optional(),
@@ -315,7 +317,7 @@ router.post("/import", validate(importSchema), (req, res) => {
           ],
         );
       }
-      updateLevel(me);
+      updateRanks(me);
     }
     if (movies && "pickedMovie" in movies) {
       const picked = movies.pickedMovie && known(movies.pickedMovie) ? movies.pickedMovie : null;

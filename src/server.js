@@ -2,7 +2,7 @@ import { createApp } from "./app.js";
 import config from "./config.js";
 import { closeDatabase, openDatabase, poolSize } from "./db/index.js";
 import { pruneActivity } from "./lib/activity.js";
-import { updateAllLevels } from "./lib/xp.js";
+import { updateAllRanks } from "./lib/ranks.js";
 import { pruneMovieNights } from "./routes/movieNights.js";
 
 const MAINTENANCE_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -19,10 +19,10 @@ if (movies === 0) {
   console.log(`${movies} movies in the pool`);
 }
 
-// XP and level are worked out here, not by the app — refresh everyone's on
-// start, so older app-reported values (or a changed pool) are corrected.
-const users = updateAllLevels();
-console.log(`Levels checked for ${users} account(s)`);
+// Ranks are worked out here, not by the app — recount everyone's on start,
+// so a changed pool or changed sagas are reflected.
+const users = updateAllRanks();
+console.log(`Ranks counted for ${users} account(s)`);
 
 // Housekeeping, now and every few hours: old friends-feed events and
 // finished movie nights.

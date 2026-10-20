@@ -3,6 +3,7 @@ import { after, before, describe, test } from "node:test";
 import { createApp } from "../src/app.js";
 import { all, closeDatabase, get, openDatabase, run, writePool, writeSagas } from "../src/db/index.js";
 import { pushTransport } from "../src/lib/push.js";
+import { titleName, titleStepFor } from "../src/lib/titles.js";
 import { pruneActivity } from "../src/lib/activity.js";
 import { verifiers } from "../src/lib/social.js";
 import fs from "node:fs";
@@ -430,29 +431,16 @@ describe("collections", () => {
     assert.ok(franchise.body.art?.backdrop?.startsWith("https://"));
   });
 
-  test("every saga rank reached is worth 150 XP — lists earn nothing", async () => {
+  test("saga ladders aren't ranks", async () => {
     const climber = await register("Rank Climber", "rankclimber");
-    const xp = async () => (await api("GET", "/me/profile", { token: climber.token })).body.profile.xp;
-    await api("POST", "/me/watched", { token: climber.token, body: { movieId: "289" } }); // in no saga
-    const base = await xp();
-    // Each watch below reaches exactly one rank: Batman Begins → Citizen
-    // (Gotham's Guardian, 1 of 3); The Dark Knight → Detective (2 of 3,
-    // and Mind-Bender's first film, short of its first rank at 2);
-    // Inception → Dreamer (Mind-Bender, 2 of 5).
-    const gains = [];
-    let last = base;
+    // Batman Begins and The Dark Knight climb Gotham's Guardian, Inception
+    // Mind-Bender — none of it is a rank.
     for (const movieId of ["272", NOLAN.darkKnight, NOLAN.inception]) {
       await api("POST", "/me/watched", { token: climber.token, body: { movieId } });
-      const now = await xp();
-      gains.push(now - last);
-      last = now;
     }
-    // A watch is 100, a rank 150, and the rest bonuses: 50 a new genre or
-    // decade, 75 for a third film by one director (Inception, here).
-    for (const gain of gains) {
-      assert.ok(gain >= 100 + 150, `a rank in ${gain}`);
-      assert.equal((gain - 100 - 150) % 25, 0);
-    }
+    const profile = (await api("GET", "/me/profile", { token: climber.token })).body.profile;
+    assert.ok(profile.rankIds.includes("films:1"));
+    assert.ok(profile.rankIds.every((id) => !id.startsWith("saga-")), profile.rankIds.join());
   });
 });
 
@@ -571,10 +559,10 @@ describe("library", () => {
     r = await api("PUT", "/me/pinned-collections", { token, body: { collectionIds: ["a", "b", "c", "d"] } });
     assert.equal(r.status, 400);
 
-    r = await api("PATCH", "/me/profile", { token, body: { bio: "Film nerd", level: 4, xp: 2400 } });
+    r = await api("PATCH", "/me/profile", { token, body: { bio: "Film nerd", level: 4, ranks: 40, xp: 2400 } });
     assert.equal(r.body.profile.bio, "Film nerd");
-    // Level and XP come from the watch history, not from the app.
-    assert.notEqual(r.body.profile.xp, 2400);
+    // Ranks and title come from the watch history, not from the app.
+    assert.notEqual(r.body.profile.ranks, 40);
     assert.equal(r.body.profile.level, 1);
 
     r = await api("PATCH", "/me/settings", {
@@ -607,45 +595,74 @@ describe("library", () => {
   });
 });
 
-describe("xp and level", () => {
-  test("worked out by the server from the watch history; app-sent values are ignored", async () => {
-    const { token } = await register("Xp User", "xpuser");
-    const profile = async () => (await api("GET", "/me/profile", { token })).body.profile;
-    assert.equal((await profile()).xp, 0);
-
-    // 238 The Godfather (1972, Crime/Drama): 100 + genres 2×50 + decade 50.
-    await api("POST", "/me/watched", { token, body: { movieId: "238" } });
-    let p = await profile();
-    assert.equal(p.xp, 100 + 2 * 50 + 50);
-    assert.equal(p.level, 1);
-
-    // Rating it adds 10; un-rating takes it away again.
-    await api("PATCH", "/me/watched/238", { token, body: { tier: "S" } });
-    assert.equal((await profile()).xp, 260);
-    await api("PATCH", "/me/watched/238", { token, body: { tier: null } });
-    assert.equal((await profile()).xp, 250);
-
-    // A modified app claiming a huge level changes nothing.
-    const faked = await api("PATCH", "/me/profile", { token, body: { xp: 999999, level: 99, bio: "hi" } });
-    assert.equal(faked.status, 200);
-    assert.equal(faked.body.profile.xp, 250);
-    assert.equal(faked.body.profile.level, 1);
-    assert.equal(faked.body.profile.bio, "hi");
-
-    // The Godfather trilogy-ish: 3 Coppola films → director bonus (75).
-    await api("POST", "/me/watched", { token, body: { movieId: "240" } });
-    await api("POST", "/me/watched", { token, body: { movieId: "28" } });
-    p = await profile();
-    assert.ok(p.xp >= 3 * 100 + 75, `expected the director bonus, got ${p.xp}`);
-    assert.equal(p.level, p.xp >= 800 ? 2 : 1);
-
-    await api("DELETE", "/me/watched", { token });
-    assert.equal((await profile()).xp, 0);
+describe("ranks and title", () => {
+  test("the title ladder", () => {
+    assert.deepEqual(
+      [0, 2, 3, 7, 8, 13, 14, 19, 20, 26, 27, 33, 34, 39].map(titleStepFor),
+      [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7],
+    );
+    assert.equal(titleName(3), "Lead");
+    assert.equal(titleName(99), "Legend");
   });
 
-  test("friends see the server's level", async () => {
-    const a = await register("Level A", "levela");
-    const b = await register("Level B", "levelb");
+  test("worked out by the server from the watch history; app-sent values are ignored", async () => {
+    const { token } = await register("Rank User", "rankuser");
+    const profile = async () => (await api("GET", "/me/profile", { token })).body.profile;
+    let p = await profile();
+    assert.equal(p.ranks, 0);
+    assert.equal(p.title, "Extra");
+
+    // The first film is a rank: First Watch. (Watched at one fixed noon,
+    // so the three below fall on the same day whenever this runs.)
+    const noon = Date.UTC(2026, 0, 1, 12);
+    await api("POST", "/me/watched", { token, body: { movieId: "238", watchedAt: noon } });
+    p = await profile();
+    assert.deepEqual(p.rankIds, ["films:1"]);
+    assert.equal(p.ranks, 1);
+
+    // Three D or F tiers: Tough Critic. (Three films in a day: Marathoner.)
+    for (const movieId of ["238", "240", "28"]) {
+      if (movieId !== "238") await api("POST", "/me/watched", { token, body: { movieId, watchedAt: noon } });
+      await api("PATCH", `/me/watched/${movieId}`, { token, body: { tier: "F" } });
+    }
+    p = await profile();
+    assert.ok(p.rankIds.includes("tough-critic:1"), p.rankIds.join());
+    assert.ok(p.rankIds.includes("marathoner:1"), p.rankIds.join());
+    // A better tier takes the harsh one back.
+    await api("PATCH", "/me/watched/28", { token, body: { tier: "A" } });
+    assert.ok(!(await profile()).rankIds.includes("tough-critic:1"));
+
+    // Three rewatched films: Comfort Watcher.
+    for (const movieId of ["238", "240", "28"]) {
+      await api("POST", `/me/watched/${movieId}/rewatch`, { token });
+    }
+    assert.ok((await profile()).rankIds.includes("comfort-watcher:1"));
+
+    // A finished dare: Dare Devil.
+    await api("POST", "/me/challenges/active", {
+      token,
+      body: { challenge: { id: "dare-1", type: "decade", title: "Go old", targetMovieId: "539" } },
+    });
+    await api("POST", "/me/watched", { token, body: { movieId: "539" } });
+    p = await profile();
+    assert.ok(p.rankIds.includes("dare-devil:1"));
+    assert.equal(p.ranks, p.rankIds.length);
+
+    // A modified app claiming more changes nothing.
+    const faked = await api("PATCH", "/me/profile", { token, body: { ranks: 999, level: 7, bio: "hi" } });
+    assert.equal(faked.status, 200);
+    assert.equal(faked.body.profile.ranks, p.ranks);
+    assert.equal(faked.body.profile.level, titleStepFor(p.ranks));
+    assert.equal(faked.body.profile.bio, "hi");
+
+    // Clearing the history leaves the dare.
+    await api("DELETE", "/me/watched", { token });
+    assert.deepEqual((await profile()).rankIds, ["dare-devil:1"]);
+  });
+
+  test("friends see the server's ranks and title; rarity counts everyone's", async () => {
+    const a = await register("Rank A", "ranka");
+    const b = await register("Rank B", "rankb");
     for (const movieId of ["289", "15", "872", "389", "539", "426", "213", "239"]) {
       await api("POST", "/me/watched", { token: a.token, body: { movieId, tier: "A" } });
     }
@@ -654,8 +671,16 @@ describe("xp and level", () => {
     await api("POST", `/friends/requests/${b.user.id}/accept`, { token: a.token });
     const friend = (await api("GET", "/friends", { token: b.token })).body.friends[0];
     const own = (await api("GET", "/me/profile", { token: a.token })).body.profile;
-    assert.ok(own.level > 1);
+    assert.ok(own.ranks >= 2);
+    assert.equal(friend.ranks, own.ranks);
     assert.equal(friend.level, own.level);
+    assert.equal(friend.title, own.title);
+
+    const rarity = await api("GET", "/ranks/rarity", { token: b.token });
+    assert.equal(rarity.status, 200);
+    assert.ok(rarity.body.watchers >= 1);
+    assert.ok(rarity.body.rarity["films:1"] >= 1 && rarity.body.rarity["films:1"] <= 100);
+    assert.equal(rarity.body.rarity["films:7"], undefined, "nobody has watched 1000 films");
   });
 });
 
@@ -1190,8 +1215,8 @@ describe("TMDB: any movie, search, browse, people", () => {
     assert.equal(asked() - before, 1, "asked TMDB once");
   });
 
-  test("save, watch and tier any movie; it comes back with the account and earns XP", async () => {
-    const xpBefore = (await api("GET", "/me/profile", { token })).body.profile.xp;
+  test("save, watch and tier any movie; it comes back with the account and counts for ranks", async () => {
+    const ranksBefore = (await api("GET", "/me/profile", { token })).body.profile.ranks;
     assert.equal((await api("POST", "/me/watchlist", { token, body: { movieId: FAKE_MOVIE_ID } })).status, 201);
     let me = (await api("GET", "/me", { token })).body;
     assert.deepEqual(me.movies.map((movie) => movie.id), [FAKE_MOVIE_ID]);
@@ -1200,7 +1225,7 @@ describe("TMDB: any movie, search, browse, people", () => {
 
     await api("POST", "/me/watched", { token, body: { movieId: FAKE_MOVIE_ID, tier: "A" } });
     me = (await api("GET", "/me", { token })).body;
-    assert.ok(me.profile.xp > xpBefore, "watching it counts");
+    assert.ok(me.profile.ranks > ranksBefore, "watching it counts (First Watch)");
     assert.deepEqual((await api("GET", "/me/library", { token })).body.movies.map((m) => m.id), [FAKE_MOVIE_ID]);
 
     // Friends get it with their friend list; the community counts it.

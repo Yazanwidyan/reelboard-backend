@@ -36,6 +36,13 @@ router.get("/mine", validate(feedQuery, "query"), (req, res) => {
 });
 
 const achievementSchema = z.discriminatedUnion("type", [
+  // A new rank: { rank: "Hogwarts Graduate", track: "Potterhead" }.
+  z.object({
+    type: z.literal("rank"),
+    rank: z.string().trim().min(1).max(60),
+    track: z.string().trim().min(1).max(80),
+  }),
+  // Older apps: a badge, or a finished collection.
   z.object({ type: z.literal("badge"), badge: z.string().trim().min(1).max(60) }),
   // Finished a collection: { set: "Martin Scorsese", count: 4 }
   z.object({

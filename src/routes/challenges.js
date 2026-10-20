@@ -3,6 +3,7 @@ import { z } from "zod";
 import { run, toJSON, transaction } from "../db/index.js";
 import { newId } from "../lib/ids.js";
 import { getChallenges } from "../lib/library.js";
+import { updateRanks } from "../lib/ranks.js";
 import { ensureMovie } from "../lib/movies.js";
 import { challenge } from "../lib/schemas.js";
 import { validate } from "../middleware/validate.js";
@@ -46,6 +47,8 @@ router.post("/active/skip", (req, res) => {
 
 router.delete("/history", (req, res) => {
   run("DELETE FROM challenges WHERE user_id = ? AND status <> 'active'", [req.userId]);
+  // Finished dares were ranks (Dare Devil).
+  updateRanks(req.userId);
   res.status(204).end();
 });
 

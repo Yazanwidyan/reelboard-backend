@@ -167,13 +167,14 @@ describe("admin", () => {
     assert.equal(curation().excluded, undefined, "no longer excluded");
   });
 
-  test("sagas: edit, create, delete — live, in curation.json, and XP follows", async () => {
+  test("sagas: edit, create, delete — live, in curation.json; ranks don't move", async () => {
     const list = await api("GET", "/admin/sagas", { token: boss.token });
     assert.equal(list.body.sagas[0].id, SAGA.id);
     assert.equal(list.body.sagas[0].started, 1);
 
     // The regular user has watched The Dark Knight: one rank (Citizen).
-    const xpBefore = (await api("GET", "/me/profile", { token: regular.token })).body.profile.xp;
+    const ranks = async () => (await api("GET", "/me/profile", { token: regular.token })).body.profile.ranks;
+    const ranksBefore = await ranks();
     const edited = await api("PATCH", `/admin/sagas/${SAGA.id}`, {
       token: boss.token,
       body: { title: "Bat-Fan", ranks: [{ title: "Citizen", at: 1 }, { title: "Vigilante", at: 3 }] },
@@ -187,7 +188,7 @@ describe("admin", () => {
     // The app gets the new version at once.
     const featured = await api("GET", "/collections", { token: regular.token });
     assert.equal(featured.body.collections[0].title, "Bat-Fan");
-    assert.equal((await api("GET", "/me/profile", { token: regular.token })).body.profile.xp, xpBefore, "still one rank");
+    assert.equal(await ranks(), ranksBefore, "still one rank");
 
     // A rank needing more films than the saga has is refused.
     assert.equal(
@@ -208,13 +209,13 @@ describe("admin", () => {
     assert.equal(created.status, 201, JSON.stringify(created.body));
     assert.ok(created.body.saga.art?.backdrop);
     assert.ok(curation().sagas.some((item) => item.id === "nolan-starter" && item.from.ids.length === 3));
-    // The Dark Knight now reaches Dreamer too: +150.
-    assert.equal((await api("GET", "/me/profile", { token: regular.token })).body.profile.xp, xpBefore + 150);
+    // The Dark Knight now reaches Dreamer too — a saga's ladder, not a rank.
+    assert.equal(await ranks(), ranksBefore);
     assert.equal((await api("POST", "/admin/sagas", { token: boss.token, body: { ...created.body.saga, id: "nolan-starter" } })).status, 400);
 
     assert.equal((await api("DELETE", "/admin/sagas/saga-nolan-starter", { token: boss.token })).status, 204);
     assert.ok(!curation().sagas.some((item) => item.id === "nolan-starter"));
-    assert.equal((await api("GET", "/me/profile", { token: regular.token })).body.profile.xp, xpBefore);
+    assert.equal(await ranks(), ranksBefore);
   });
 
   test("clubs: list and remove", async () => {

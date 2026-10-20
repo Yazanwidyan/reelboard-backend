@@ -1,4 +1,5 @@
 import { all, fromJSON, get } from "../db/index.js";
+import { titleName } from "./titles.js";
 
 // Avatar ring colors, the same family the app's mock friends use.
 const COLORS = ["#8FD3F5", "#F8E08E", "#A4E59B", "#A9C4FF", "#F5B98F", "#F2A7C3", "#C9B6F2"];
@@ -10,13 +11,16 @@ export const pickColor = (seed) => {
 };
 
 // How other people see a user — same fields as the app's mock friends
-// (name, "@handle", color, level), plus avatar and bio.
+// (name, "@handle", color), their ranks and title (`level` is the title's
+// step, 1–7), plus avatar and bio.
 export const toPublicUser = (row) => ({
   id: row.id,
   name: row.display_name,
   handle: `@${row.handle}`,
   color: row.color,
   level: row.level,
+  ranks: row.ranks ?? 0,
+  title: titleName(row.level),
   avatarUri: row.avatar_uri,
   bio: row.bio,
 });
@@ -32,8 +36,10 @@ export const toProfile = (row) => ({
   bio: row.bio,
   avatarUri: row.avatar_uri,
   color: row.color,
-  xp: row.xp,
+  ranks: row.ranks ?? 0,
+  rankIds: fromJSON(row.rank_ids, []),
   level: row.level,
+  title: titleName(row.level),
   topTen: fromJSON(row.top_ten, []),
   pinnedCollections: fromJSON(row.pinned_collections, []),
   createdAt: row.created_at,

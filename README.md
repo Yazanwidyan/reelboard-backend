@@ -56,7 +56,7 @@ npm run build-pool -- --offline    # cached TMDB answers only, no requests
 - **Auth:** send `Authorization: Bearer <token>`. `register` and `login` return `{ token, user }`.
 - **Timestamps:** milliseconds since the epoch, the same as `Date.now()` in the app.
 - **Movie ids:** TMDB ids, as strings (`"603"`). Each movie's IMDb id is in `details.imdbId`.
-- **Response shapes:** these match the app's Zustand stores. For example, a watched entry is `{ movieId, timestamp, tier, rating, watchCount }`, a board is `{ id, name, movieIds, createdAt, updatedAt }`, and a friend is `{ id, name, handle, color, level, watched: [{ movieId, tier }] }`. You can hydrate stores directly from responses.
+- **Response shapes:** these match the app's Zustand stores. For example, a watched entry is `{ movieId, timestamp, tier, rating, watchCount }`, a board is `{ id, name, movieIds, createdAt, updatedAt }`, and a friend is `{ id, name, handle, color, ranks, level, title, watched: [{ movieId, tier }] }`. You can hydrate stores directly from responses.
 - **Errors:** `{ error: { message, details? } }`. Validation errors (400) list each bad field in `details`.
 - **Idempotency-Key:** any signed-in change (POST, PUT, PATCH, DELETE) can carry an `Idempotency-Key` header: 8–100 characters of `A–Z a–z 0–9 _ -`, unique per change. If the same key arrives again, the server sends back the first response (marked `Idempotent-Replayed: true`) without applying the change a second time. Using the key for a different request returns `409`. Keys are per account and kept for 7 days. The app sends one with every change, so re-sending after a lost reply or a restart is safe.
 - **Deletes don't fail when the thing is already gone:** removing a movie that's no longer on the watchlist, watched list or a board, deleting a board that no longer exists, or skipping when there's no active challenge all succeed. The end state is what was asked for.
@@ -117,8 +117,8 @@ Everything on TMDB (signed in, at most 120 requests a minute per account):
 | GET | `/api/me` | **Everything at once:** profile, settings, library, boards, challenges, taste, recent searches — and `movies` (every movie in them) and `collections` (yours, as in `/me/library`). The app uses it on sign-in, and to refresh everything when it comes back to the front. |
 | POST | `/api/me/import` | Uploads the app's local AsyncStorage stores (`{ movieStore, boardStore, profileStore, userStore, tasteStore, challengeStore, languageStore, themeStore, tipsStore, recentSearchStore }`, each optional). Each store you send **replaces** that part of the account. |
 | DELETE | `/api/me` | `{ password }`. Deletes the account and all its data. |
-| GET / PATCH | `/api/me/profile` | `{ displayName, bio, avatarUri, handle }`. `xp` and `level` are read-only (see below). |
-| PUT | `/api/me/top-ten` | `{ movieIds }`, up to 10, #1 first |
+| GET / PATCH | `/api/me/profile` | `{ displayName, bio, avatarUri, handle }`. `ranks`, `rankIds`, `level` and `title` are read-only (see Ranks below). |
+| PUT | `/api/me/top-ten` | `{ movieIds }`: the order of your S tier, #1 first. S films not in it come after, most recent first. |
 | PUT | `/api/me/pinned-collections` | `{ collectionIds }`, up to 3 |
 | GET / PATCH | `/api/me/settings` | `{ language, theme, preferences (merged), hasCompletedOnboarding, tipsSeen (merged), resetTips }` |
 | GET / POST / DELETE | `/api/me/searches` | POST `{ term }`. Keeps the 8 most recent. |
@@ -173,7 +173,7 @@ Everything on TMDB (signed in, at most 120 requests a minute per account):
 | DELETE | `/api/friends/:userId` | unfriend |
 | GET | `/api/activity` | friends' feed, newest first. `?before=<timestamp>&limit=30&includeMine=false` |
 | GET | `/api/activity/mine` | |
-| POST | `/api/activity` | `{ type: "badge", badge }` or `{ type: "set", set, count }` |
+| POST | `/api/activity` | A new rank: `{ type: "rank", rank, track }`. (Older apps: `{ type: "badge", badge }`, `{ type: "set", set, count }`.) |
 
 `watched`, `tier` and `watchlist` events are recorded automatically. Badges and completed collections are worked out on the device, so the app posts them. Re-tiering the same movie within an hour updates the earlier event instead of adding a new one.
 
@@ -234,31 +234,46 @@ The server sends through Expo's push service (`src/lib/push.js`) for: friend req
 
 A franchise, a director's films, an actor's films, the best of a decade or a genre, worked out from the pool (`src/lib/collections.js`). They're sent as definitions, `{ id, type, title, movieIds }`, with ids like `director-christopher-nolan`:
 - **franchise, director:** 2+ pool films. **actor:** 3+ in the top-billed cast. **decade, genre:** all of them, trimmed to the 15 best-ranked ("Best of the 1990s").
-- **Yours** come with `/me/library` and `/me`: every one you've unlocked, and the ones you've started. For a franchise, decade or genre one film is a start; for a director or an actor it takes two. That always includes every finished collection, and every one a single watch could finish, so the app's XP (and a dare's promised XP) matches the server's.
+- **Yours** come with `/me/library` and `/me`: every one you've unlocked, and the ones you've started. For a franchise, decade or genre one film is a start; for a director or an actor it takes two. That always includes every finished collection, and every one a single watch could finish, so the app's ranks (and the ranks a dare promises) match the server's.
 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/collections` | The best-known 30 franchises, directors and actors (by their films' TMDB votes), and every decade and genre, with cards for the first 4 films of each. Sent with an `ETag` (`If-None-Match` → `304`). The app's collection browser and suggestions use it. |
 | GET | `/api/collections/:id` | One collection, with cards for every film in it. |
 
-### XP and level
+### Ranks
 
-The server works these out from the watch history (`src/lib/xp.js`) and stores them on the account, so the level friends see can't be faked:
-- **When it updates:** after every change to a watch history, and for everyone when the server starts.
-- **What's ignored:** `xp` and `level` sent to `PATCH /api/me/profile`.
-- **Same rules as the app:** they match the app's `src/utils/xp.js` exactly, so its instant display agrees with the server. Change both together.
+The one progress system: everything you can achieve is a **rank** on a track, the number of ranks is your score, and your **title** comes from it. The server works them out from the watch history (`src/lib/ranks.js`) and stores them on the account (`ranks`, `rank_ids`, and the title's step as `level`), so what friends see can't be faked:
+- **When it updates:** after every change to a watch history (a watch, a tier, a rewatch, a watch date), when a dare is finished or the dare history cleared, and for everyone when the server starts.
+- **What's ignored:** `ranks`, `level` (and old apps' `xp`) sent to `PATCH /api/me/profile`.
+- **Same rules as the app:** they match the app's `src/utils/ranks.js` exactly, so its instant display agrees with the server. Change both together.
 
-The rules:
-- 100 XP per movie watched
-- 50 per genre and 50 per decade
-- 75 per director you've seen 3+ films by
-- 200 per finished franchise / director / actor collection of 3+ films (the pool's — see Collections)
-- 10 per rated movie
+The tracks (a rank's id is `<track>:<step>`, e.g. `time-traveler:1`). Sagas aren't ranks: each has its own ladder, climbed on its own (see Collections).
+
+| Track | Counts | Ranks at |
+|---|---|---|
+| `films` | films watched | 1, 10, 50, 100, 250, 500, 1000 |
+| `tiered` | films tiered | 10, 50, 100, 250, 500 |
+| `time-traveler` | decades | 4, 7, 10 |
+| `genre-hopper` | genres | 6, 10, 15 |
+| `auteur-hunter` | directors seen 3+ films by | 2, 6, 15 |
+| `old-soul` | films from before 1970 | 3, 12, 30 |
+| `tough-critic` | films tiered D or F | 3, 10, 25 |
+| `long-haul` | films of 2h 45m or more | 3, 10, 25 |
+| `marathoner` | days (UTC) with 3+ films watched | 1, 5, 15 |
+| `comfort-watcher` | films rewatched | 3, 10, 25 |
+| `dare-devil` | dares finished | 1, 10, 50 |
+
+Titles (`src/lib/titles.js`), by ranks (39 in all): Extra 0 · Supporting Role 3 · Lead 8 · Star 14 · Auteur 20 · Icon 27 · Legend 34.
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/ranks/rarity` | `{ watchers, rarity: { "<rank id>": percent } }`: the share of watchers (anyone with a rank) who have each rank. Ranks nobody has are left out. |
 
 ### Admin (signed in, `ADMIN_EMAILS` only)
 The [admin site](../Reelboard-admin) uses these. Every request checks that the account's email is in `ADMIN_EMAILS`, matched case-insensitively. Other accounts get `403`.
 
-Edits to movies and sagas are live, and they're also written to `data/curation.json` (in its own layout, so the git diff shows just the changed lines). That way `npm run build-pool` keeps them. Each one also recomputes everyone's level.
+Edits to movies and sagas are live, and they're also written to `data/curation.json` (in its own layout, so the git diff shows just the changed lines). That way `npm run build-pool` keeps them.
 
 | Method | Path | Notes |
 |---|---|---|

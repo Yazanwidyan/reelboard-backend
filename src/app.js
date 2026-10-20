@@ -24,6 +24,7 @@ import movieNightRoutes from "./routes/movieNights.js";
 import movieRoutes from "./routes/movies.js";
 import peopleRoutes from "./routes/people.js";
 import pushRoutes from "./routes/push.js";
+import rankRoutes from "./routes/ranks.js";
 import tasteRoutes from "./routes/taste.js";
 
 // Builds the Express app. The database must already be open (see server.js).
@@ -76,6 +77,7 @@ export const createApp = () => {
   app.use("/api/collections", signedIn, collectionRoutes);
   app.use("/api/people", signedIn, peopleRoutes);
   app.use("/api/movie-nights", signedIn, movieNightRoutes);
+  app.use("/api/ranks", signedIn, rankRoutes);
 
   // Admins only (ADMIN_EMAILS) — the admin site's API.
   app.use("/api/admin", requireAuth, requireAdmin, adminRoutes);

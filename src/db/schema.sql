@@ -49,11 +49,13 @@ CREATE TABLE IF NOT EXISTS users (
   bio                TEXT NOT NULL DEFAULT '',
   avatar_uri         TEXT,
   color              TEXT NOT NULL,
-  -- XP and level are computed by the app (utils/xp.js) and reported here so
-  -- friends can see them.
-  xp                 INTEGER NOT NULL DEFAULT 0,
+  -- Worked out from the watch history (lib/ranks.js): how many ranks, which
+  -- ones (JSON ids, for how rare each is), and the title they make
+  -- (1 = Extra … 7 = Legend, lib/titles.js) — what friends see.
+  ranks              INTEGER NOT NULL DEFAULT 0,
+  rank_ids           TEXT NOT NULL DEFAULT '[]',
   level              INTEGER NOT NULL DEFAULT 1,
-  top_ten            TEXT NOT NULL DEFAULT '[]',   -- JSON movie ids, #1 first
+  top_ten            TEXT NOT NULL DEFAULT '[]',   -- JSON movie ids: the S tier's order, #1 first
   pinned_collections TEXT NOT NULL DEFAULT '[]',   -- JSON collection ids
   created_at         INTEGER NOT NULL
 );

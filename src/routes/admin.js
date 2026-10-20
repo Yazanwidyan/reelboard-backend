@@ -7,8 +7,8 @@ import { readCuration, updateCuration } from "../lib/curation.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { ensureMovie, ensureMovies, getMovieById, resetMovieCache } from "../lib/movies.js";
 import { movieId, TIERS } from "../lib/schemas.js";
+import { titleName } from "../lib/titles.js";
 import { getUserRow, toProfile } from "../lib/users.js";
-import { resetXPCatalog, updateAllLevels } from "../lib/xp.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/admin, behind requireAuth + requireAdmin — the admin site
@@ -27,12 +27,10 @@ const allNamed = (sql, params) => all(sql, used(sql, params));
 const countNamed = (sql, params) => get(sql, used(sql, params)).n;
 
 // After an edit to the pool or the sagas: everything that read them is read
-// again, and every level recomputed (XP counts saga ranks).
+// again. (Sagas aren't ranks, so nobody's ranks change.)
 const refresh = () => {
   resetMovieCache();
   resetCollections();
-  resetXPCatalog();
-  updateAllLevels();
 };
 
 router.get("/me", (req, res) => {
@@ -142,7 +140,8 @@ router.get(
       handle: `@${row.handle}`,
       email: row.email,
       level: row.level,
-      xp: row.xp,
+      ranks: row.ranks,
+      title: titleName(row.level),
       color: row.color,
       avatarUri: row.avatar_uri,
       createdAt: row.created_at,
