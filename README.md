@@ -264,7 +264,7 @@ The tracks (a rank's id is `<track>:<step>`, e.g. `time-traveler:1`). Sagas aren
 | `comfort-watcher` | films rewatched | 3, 10, 25 |
 | `dare-devil` | dares finished | 1, 10, 50 |
 
-Titles (`src/lib/titles.js`), by ranks (39 in all): Extra 0 · Supporting Role 3 · Lead 8 · Star 14 · Auteur 20 · Icon 27 · Legend 34.
+Titles (`src/lib/titles.js`), by ranks (39 in all): Walk-in 0 · Regular 3 · Front Row 8 · Critic 14 · Curator 20 · Cinephile 27 · Archivist 34.
 
 | Method | Path | Notes |
 |---|---|---|

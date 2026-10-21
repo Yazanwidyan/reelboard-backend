@@ -601,8 +601,8 @@ describe("ranks and title", () => {
       [0, 2, 3, 7, 8, 13, 14, 19, 20, 26, 27, 33, 34, 39].map(titleStepFor),
       [1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7],
     );
-    assert.equal(titleName(3), "Lead");
-    assert.equal(titleName(99), "Legend");
+    assert.equal(titleName(3), "Front Row");
+    assert.equal(titleName(99), "Archivist");
   });
 
   test("worked out by the server from the watch history; app-sent values are ignored", async () => {
@@ -610,7 +610,7 @@ describe("ranks and title", () => {
     const profile = async () => (await api("GET", "/me/profile", { token })).body.profile;
     let p = await profile();
     assert.equal(p.ranks, 0);
-    assert.equal(p.title, "Extra");
+    assert.equal(p.title, "Walk-in");
 
     // The first film is a rank: First Watch. (Watched at one fixed noon,
     // so the three below fall on the same day whenever this runs.)
@@ -1265,6 +1265,32 @@ describe("TMDB: any movie, search, browse, people", () => {
     assert.equal(collection.franchise, "The Fake");
     assert.deepEqual(collection.movies.map((movie) => movie.title), ["The Fake Film", "The Fake Sequel"]);
     assert.equal((await api("GET", "/movies/collections/12345", { token })).status, 404);
+  });
+
+  test("more like this: scored from the pool, with reasons", async () => {
+    // Batman Begins (Nolan) — in the pool; TMDB has no recommendations for
+    // it here, so it's the pool alone.
+    const like = await api("GET", "/movies/272/like", { token });
+    assert.equal(like.status, 200);
+    const { similar, movies } = like.body;
+    assert.ok(similar.length > 0 && similar.length <= 20);
+    assert.ok(!similar.some((item) => item.id === "272"), "never itself");
+    const byId = new Map(movies.map((movie) => [movie.id, movie]));
+    assert.ok(similar.every((item) => byId.has(item.id)), "the movies come with it");
+    assert.ok(
+      similar.every((item) => byId.get(item.id).director !== "Christopher Nolan"),
+      "the director's films are left to \"Also by\"",
+    );
+    assert.ok(similar.every((item) => Array.isArray(item.reasons)));
+    assert.ok(
+      similar.every((item) => item.percent >= 1 && item.percent <= 99 && item.signals.feel >= 0 && item.shared),
+      "each says how similar, and in what",
+    );
+    assert.ok(byId.has("272"), "the movie itself comes too");
+    assert.equal((await api("GET", "/movies/272/like?count=5", { token })).body.similar.length, 5);
+    const scores = similar.map((item) => item.score);
+    assert.deepEqual(scores, [...scores].sort((x, y) => y - x), "best first");
+    assert.equal((await api("GET", "/movies/272/like")).status, 401);
   });
 
   test("people: search, and a filmography split by role", async () => {
