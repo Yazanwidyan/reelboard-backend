@@ -17,7 +17,7 @@ import {
   toLean,
 } from "../lib/movies.js";
 import { movieId, pagination } from "../lib/schemas.js";
-import { getSimilar } from "../lib/similar.js";
+import { findSimilar } from "../lib/similar.js";
 import { imageUrl, tmdbGet } from "../lib/tmdb.js";
 import { GENRE_IDS, franchiseOf, toSummary } from "../lib/tmdbMovies.js";
 import { requireAuth } from "../middleware/auth.js";
@@ -318,26 +318,30 @@ router.get("/:id/similar", tmdbRoute, idParam, async (req, res) => {
   res.json(toPage(data, 1));
 });
 
-// GET /api/movies/:id/like?count=20 — "More like this": the pool movies most like
-// it on feel, story, themes, genres, cast and era, with TMDB's own
-// recommendations for it as one more signal (lib/similar.js) — best
-// first, each with its reasons, and the movies themselves. Without TMDB
-// it still answers, from the pool alone.
+// GET /api/movies/:id/like?count=20 — "More like this": the films most like
+// it — what its fans went on to like and what they're about (TMDB's
+// recommendations and keywords), with feel, genres, story, cast and era
+// behind them (lib/similar.js) — best first, each with how similar and
+// why, and the movies themselves. Without TMDB it still answers, from the
+// pool alone.
 router.get(
   "/:id/like",
   tmdbRoute,
   idParam,
-  validate(z.object({ count: z.coerce.number().int().min(1).max(40).default(20) }), "query"),
+  validate(
+    z.object({
+      count: z.coerce.number().int().min(1).max(40).default(20),
+      // "true": keep the director's other films (the movie page has "Also by").
+      sameDirector: z.enum(["true", "false"]).default("false"),
+    }),
+    "query",
+  ),
   async (req, res) => {
     const movie = await ensureMovie(req.params.id);
-    let recommendedIds = [];
-    try {
-      const data = await tmdbGet(`/movie/${req.params.id}/recommendations`, { language: "en-US" }, { ttl: 24 * HOUR });
-      recommendedIds = (data?.results ?? []).map((result) => String(result.id));
-    } catch {
-      // TMDB is one signal among several; carry on without it.
-    }
-    const similar = getSimilar(movie, { recommendedIds, count: req.validQuery.count });
+    const similar = await findSimilar(movie, {
+      count: req.validQuery.count,
+      sameDirector: req.validQuery.sameDirector === "true",
+    });
     // The movie itself comes too, whole — it may have been only a card.
     res.json({ similar, movies: moviesFor([movie.id, ...similar.map((item) => item.id)]) });
   },

@@ -30,6 +30,15 @@ CREATE TABLE IF NOT EXISTS movies (
 );
 CREATE INDEX IF NOT EXISTS movies_pool ON movies (in_pool, rank);
 
+-- A movie's TMDB keywords ("car race", "le mans", "rivalry"), for "More
+-- like this" (lib/similar.js): fetched the first time a comparison needs
+-- them, then kept.
+CREATE TABLE IF NOT EXISTS movie_keywords (
+  movie_id   TEXT PRIMARY KEY,
+  keywords   TEXT NOT NULL,              -- JSON string[]
+  fetched_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS reel_clips (
   movie_id   TEXT PRIMARY KEY REFERENCES movies(id),
   youtube_id TEXT NOT NULL,
