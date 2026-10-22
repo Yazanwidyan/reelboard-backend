@@ -22,6 +22,7 @@ export const toPublicUser = (row) => ({
   ranks: row.ranks ?? 0,
   title: titleName(row.level),
   avatarUri: row.avatar_uri,
+  coverMovieId: row.cover_movie_id ?? null,
   bio: row.bio,
 });
 
@@ -35,6 +36,7 @@ export const toProfile = (row) => ({
   handle: `@${row.handle}`,
   bio: row.bio,
   avatarUri: row.avatar_uri,
+  coverMovieId: row.cover_movie_id ?? null,
   color: row.color,
   ranks: row.ranks ?? 0,
   rankIds: fromJSON(row.rank_ids, []),

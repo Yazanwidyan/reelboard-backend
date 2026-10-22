@@ -155,6 +155,10 @@ const migrate = () => {
   if (!userColumns.has("rank_ids")) {
     db.exec("ALTER TABLE users ADD COLUMN rank_ids TEXT NOT NULL DEFAULT '[]'");
   }
+  // The profile's cover: a film's still.
+  if (!userColumns.has("cover_movie_id")) {
+    db.exec("ALTER TABLE users ADD COLUMN cover_movie_id TEXT");
+  }
 };
 
 // From data/curation.json: the Taste DNA vocabulary and the clip length.

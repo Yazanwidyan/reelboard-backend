@@ -48,6 +48,8 @@ const profileSchema = z
     bio: z.string().trim().max(BIO_MAX),
     // A URL, or the app's local file:// URI until avatar upload exists.
     avatarUri: z.string().trim().max(2000).nullable(),
+    // A film's still as the profile's cover; null takes it off.
+    coverMovieId: movieId.nullable(),
     handle,
     // Ranks and level aren't accepted: the server works them out from the
     // watch history (lib/ranks.js). Older apps still send XP and a level;
@@ -59,6 +61,7 @@ const PROFILE_COLUMNS = {
   displayName: "display_name",
   bio: "bio",
   avatarUri: "avatar_uri",
+  coverMovieId: "cover_movie_id",
   handle: "handle",
 };
 

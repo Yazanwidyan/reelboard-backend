@@ -57,6 +57,8 @@ CREATE TABLE IF NOT EXISTS users (
   display_name       TEXT NOT NULL,
   bio                TEXT NOT NULL DEFAULT '',
   avatar_uri         TEXT,
+  -- A film you've watched whose still is your profile's cover.
+  cover_movie_id     TEXT,
   color              TEXT NOT NULL,
   -- Worked out from the watch history (lib/ranks.js): how many ranks, which
   -- ones (JSON ids, for how rare each is), and the title they make
