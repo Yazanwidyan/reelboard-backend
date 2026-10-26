@@ -2,12 +2,13 @@ import { Router } from "express";
 import { z } from "zod";
 import { all, catalogMeta, fromJSON, get, readSagas, run, toJSON, transaction, writeSagas } from "../db/index.js";
 import { listActivity } from "../lib/activity.js";
+import { listAdminLog, logAdmin } from "../lib/adminLog.js";
 import { getSagas, resetCollections, SAGA } from "../lib/collections.js";
 import { readCuration, updateCuration } from "../lib/curation.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { ensureMovie, ensureMovies, getMovieById, resetMovieCache } from "../lib/movies.js";
 import { movieId, TIERS } from "../lib/schemas.js";
-import { listBoards } from "../lib/library.js";
+import { listBoards, toBoard } from "../lib/library.js";
 import { createSagaResolver, resolveRanks } from "../lib/sagaSources.js";
 import { titleName } from "../lib/titles.js";
 import { IMAGE_BASE, tmdbGet } from "../lib/tmdb.js";
@@ -22,6 +23,9 @@ import { CLUB_DESCRIPTION_MAX, CLUB_NAME_MAX } from "./clubs.js";
 const router = Router();
 
 const DAY = 24 * 60 * 60 * 1000;
+// Every change made here goes in the admin log (lib/adminLog).
+const log = (req, action, target, summary) => logAdmin(req.userId, action, target, summary);
+const quoted = (text) => `"${text}"`;
 const page = z.coerce.number().int().min(1).default(1);
 const limit = (max, fallback) => z.coerce.number().int().min(1).max(max).default(fallback);
 const like = (q) => `%${q.replace(/[%_\\]/g, "\\$&")}%`;
@@ -225,25 +229,31 @@ const moderatable = (id, req) => {
   return row;
 };
 
+const suspendUser = (req, id, reason) => {
+  const row = moderatable(id, req);
+  run("UPDATE users SET suspended_at = COALESCE(suspended_at, ?), suspended_reason = ? WHERE id = ?", [
+    Date.now(),
+    reason,
+    id,
+  ]);
+  log(req, "user.suspend", { type: "user", id }, `Suspended @${row.handle}${reason ? ` — ${reason}` : ""}`);
+  return getUserRow(id);
+};
+
 router.post(
   "/users/:id/suspend",
   userParam,
   validate(z.object({ reason: z.string().trim().max(200).default("") })),
   (req, res) => {
-    moderatable(req.params.id, req);
-    run("UPDATE users SET suspended_at = COALESCE(suspended_at, ?), suspended_reason = ? WHERE id = ?", [
-      Date.now(),
-      req.body.reason,
-      req.params.id,
-    ]);
-    const row = getUserRow(req.params.id);
+    const row = suspendUser(req, req.params.id, req.body.reason);
     res.json({ suspension: { at: row.suspended_at, reason: row.suspended_reason } });
   },
 );
 
 router.delete("/users/:id/suspend", userParam, (req, res) => {
-  moderatable(req.params.id, req);
-  run("UPDATE users SET suspended_at = NULL, suspended_reason = NULL WHERE id = ?", [req.params.id]);
+  const row = moderatable(req.params.id, req);
+  run("UPDATE users SET suspended_at = NULL, suspended_reason = NULL WHERE id = ?", [row.id]);
+  log(req, "user.unsuspend", { type: "user", id: row.id }, `Unsuspended @${row.handle}`);
   res.json({ suspension: null });
 });
 
@@ -268,14 +278,22 @@ router.post(
       if (cover) run("UPDATE users SET cover_movie_id = NULL WHERE id = ?", [row.id]);
       if (name) run("UPDATE users SET display_name = handle WHERE id = ?", [row.id]);
     });
+    const what = [name && `name (was ${quoted(row.display_name)})`, bio && "bio", avatar && "photo", cover && "cover still"].filter(Boolean);
+    log(req, "user.clean", { type: "user", id: row.id }, `Cleaned up @${row.handle}'s ${what.join(", ")}`);
     res.json({ user: toProfile(getUserRow(row.id)) });
   },
 );
 
 // Removes someone's list (its films stay in their library).
+const removeList = (req, id) => {
+  const board = get("SELECT boards.name, users.handle FROM boards JOIN users ON users.id = boards.user_id WHERE boards.id = ?", [id]);
+  if (!board) throw notFound("No such list");
+  run("DELETE FROM boards WHERE id = ?", [id]);
+  log(req, "list.remove", { type: "list", id }, `Removed @${board.handle}'s list ${quoted(board.name)}`);
+};
+
 router.delete("/boards/:id", validate(z.object({ id: z.string().min(1).max(64) }), "params"), (req, res) => {
-  if (!get("SELECT 1 FROM boards WHERE id = ?", [req.params.id])) throw notFound("No such list");
-  run("DELETE FROM boards WHERE id = ?", [req.params.id]);
+  removeList(req, req.params.id);
   res.status(204).end();
 });
 
@@ -283,8 +301,10 @@ router.delete("/boards/:id", validate(z.object({ id: z.string().min(1).max(64) }
 // for that).
 router.delete("/users/:id", userParam, (req, res) => {
   if (req.params.id === req.userId) throw badRequest("You can't delete your own account here");
-  if (!getUserRow(req.params.id)) throw notFound("No such user");
-  run("DELETE FROM users WHERE id = ?", [req.params.id]);
+  const row = getUserRow(req.params.id);
+  if (!row) throw notFound("No such user");
+  run("DELETE FROM users WHERE id = ?", [row.id]);
+  log(req, "user.delete", { type: "user", id: row.id }, `Deleted @${row.handle}'s account (${row.email})`);
   res.status(204).end();
 });
 
@@ -436,6 +456,15 @@ router.patch(
       if (inPool === false) run("UPDATE movies SET in_pool = 0, rank = NULL WHERE id = ?", [id]);
     });
     refresh();
+    const changes = [
+      newVibe && "hand-tuned its vibe",
+      franchise !== undefined && (franchise ? `franchise ${quoted(franchise)}` : "cleared its franchise"),
+      inPool === true && !movie.inPool && "put it in the pool",
+      inPool === false && "took it out of the pool",
+    ].filter(Boolean);
+    if (changes.length > 0) {
+      log(req, "movie.update", { type: "movie", id }, `${movie.title} (${movie.year ?? "?"}): ${changes.join(", ")}`);
+    }
     const { fetchedAt, ...updated } = getMovieById(id);
     res.json({ movie: updated, stats: movieStats(id) });
   },
@@ -702,6 +731,7 @@ router.post(
       curation.sagas = [...(curation.sagas ?? []), toCurated(saga, { from: films.from, ranks: plan.curated, art: picked })];
     });
     saveSagas([...sagas, saga]);
+    log(req, "saga.create", { type: "saga", id: saga.id }, `Created the collection ${quoted(title)} (${saga.movieIds.length} films)`);
     res.status(201).json({ saga, stats: sagaStats(saga), movies: sagaCard(saga.movieIds) });
   },
 );
@@ -779,17 +809,28 @@ router.patch(
     });
     sagas[index] = saga;
     saveSagas(sagas);
+    const edited = [
+      saga.title !== current.title && `renamed from ${quoted(current.title)}`,
+      (saga.subtitle !== current.subtitle || saga.kind !== current.kind) && "details",
+      filmsChanged && `films (${current.movieIds.length} → ${movieIds.length})`,
+      changes.from && !filmsChanged && "its rule",
+      changes.ranks && "ranks",
+      changes.art !== undefined && "picture",
+    ].filter(Boolean);
+    log(req, "saga.update", { type: "saga", id: saga.id }, `Edited the collection ${quoted(saga.title)}${edited.length ? `: ${edited.join(", ")}` : ""}`);
     res.json({ saga, stats: sagaStats(saga), movies: sagaCard(saga.movieIds) });
   },
 );
 
 router.delete("/sagas/:id", sagaParam, (req, res) => {
   const sagas = readSagas();
-  if (!sagas.some((saga) => saga.id === req.params.id)) return res.status(204).end();
+  const gone = sagas.find((saga) => saga.id === req.params.id);
+  if (!gone) return res.status(204).end();
   updateCuration((curation) => {
     curation.sagas = (curation.sagas ?? []).filter((item) => `saga-${item.id}` !== req.params.id);
   });
   saveSagas(sagas.filter((saga) => saga.id !== req.params.id));
+  log(req, "saga.delete", { type: "saga", id: gone.id }, `Deleted the collection ${quoted(gone.title)}`);
   res.status(204).end();
 });
 
@@ -897,6 +938,11 @@ router.patch(
       if (description !== undefined) run("UPDATE clubs SET description = ? WHERE id = ?", [description, club.id]);
     });
     const updated = loadClub(club.id);
+    const edited = [
+      name !== undefined && name !== club.name && `renamed from ${quoted(club.name)}`,
+      description !== undefined && description !== club.description && (description ? "changed its description" : "cleared its description"),
+    ].filter(Boolean);
+    if (edited.length > 0) log(req, "club.update", { type: "club", id: club.id }, `Club ${quoted(updated.name)}: ${edited.join(", ")}`);
     res.json({ club: { id: updated.id, name: updated.name, description: updated.description } });
   },
 );
@@ -913,13 +959,181 @@ router.delete(
         run("UPDATE clubs SET now_watching_movie_id = NULL, now_watching_set_at = NULL WHERE id = ?", [club.id]);
       }
     });
+    const title = getMovieById(req.params.movieId)?.title ?? `movie ${req.params.movieId}`;
+    log(req, "club.film", { type: "club", id: club.id }, `Took ${quoted(title)} off the club ${quoted(club.name)}'s board`);
     res.status(204).end();
   },
 );
 
+const removeClub = (req, id) => {
+  const club = get("SELECT clubs.name, users.handle FROM clubs JOIN users ON users.id = clubs.owner_id WHERE clubs.id = ?", [id]);
+  if (!club) return;
+  run("DELETE FROM clubs WHERE id = ?", [id]);
+  log(req, "club.remove", { type: "club", id }, `Removed @${club.handle}'s club ${quoted(club.name)}`);
+};
+
 router.delete("/clubs/:id", clubParam, (req, res) => {
-  run("DELETE FROM clubs WHERE id = ?", [req.params.id]);
+  removeClub(req, req.params.id);
   res.status(204).end();
 });
+
+// ---- Reports -------------------------------------------------------------------
+//
+// What people reported from the app (routes/reports.js), grouped by what
+// was reported — each group a "case": the reported thing as it is now, its
+// owner, and every report about it. An admin closes a case all at once:
+// dismissed (nothing wrong), handled (fixed by hand, e.g. a cleaned-up
+// profile), the list or club removed, or its owner suspended.
+
+const REASON_LABELS = {
+  spam: "spam",
+  offensive: "offensive",
+  harassment: "harassment",
+  impersonation: "impersonation",
+  other: "other",
+};
+const personOf = (id) => {
+  const row = id ? getUserRow(id) : null;
+  return row ? { id: row.id, name: row.display_name, handle: `@${row.handle}`, suspended: isSuspended(row) } : null;
+};
+
+// The reported thing as it is now, or null if it's gone.
+const reportedNow = (type, id) => {
+  if (type === "user") {
+    const row = getUserRow(id);
+    return row && { label: `${row.display_name} (@${row.handle})`, bio: row.bio, avatarUri: row.avatar_uri };
+  }
+  if (type === "list") {
+    const row = get("SELECT * FROM boards WHERE id = ?", [id]);
+    if (!row) return null;
+    const board = toBoard(row);
+    return {
+      label: board.name,
+      movieCount: board.movieIds.length,
+      posters: board.movieIds.slice(0, 6).map((movie) => getMovieById(movie)?.poster ?? null),
+    };
+  }
+  const club = get("SELECT * FROM clubs WHERE id = ?", [id]);
+  return (
+    club && {
+      label: club.name,
+      description: club.description,
+      memberCount: count("SELECT COUNT(*) AS n FROM club_members WHERE club_id = ?", [club.id]),
+    }
+  );
+};
+const describeTarget = (type, label) => (type === "user" ? label : `${type} ${quoted(label)}`);
+const openCaseCount = () =>
+  get("SELECT COUNT(*) AS n FROM (SELECT 1 FROM reports WHERE status = 'open' GROUP BY target_type, target_id)").n;
+
+router.get("/reports/count", (req, res) => {
+  res.json({ open: openCaseCount() });
+});
+
+router.get(
+  "/reports",
+  validate(z.object({ status: z.enum(["open", "actioned", "dismissed"]).default("open") }), "query"),
+  (req, res) => {
+    const { status } = req.validQuery;
+    const rows = all(
+      `SELECT * FROM reports WHERE status = ? ORDER BY ${status === "open" ? "created_at" : "resolved_at"} DESC LIMIT 500`,
+      [status],
+    );
+    const groups = new Map();
+    rows.forEach((row) => {
+      const key = `${row.target_type}:${row.target_id}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(row);
+    });
+    const cases = [...groups.entries()].map(([key, list]) => {
+      const [first] = list;
+      const now = reportedNow(first.target_type, first.target_id);
+      return {
+        key,
+        targetType: first.target_type,
+        targetId: first.target_id,
+        label: now?.label ?? first.target_label,
+        gone: !now,
+        target: now,
+        owner: personOf(first.owner_id),
+        lastAt: Math.max(...list.map((row) => row.created_at)),
+        resolvedAt: first.resolved_at,
+        resolution: first.resolution,
+        resolvedBy: personOf(first.resolved_by),
+        reports: list.map((row) => ({
+          id: row.id,
+          reason: row.reason,
+          note: row.note,
+          reporter: personOf(row.reporter_id),
+          createdAt: row.created_at,
+        })),
+      };
+    });
+    if (status === "open") cases.sort((a, b) => b.reports.length - a.reports.length || b.lastAt - a.lastAt);
+    res.json({ cases, open: openCaseCount() });
+  },
+);
+
+router.post(
+  "/reports/resolve",
+  validate(
+    z.object({
+      targetType: z.enum(["user", "list", "club"]),
+      targetId: z.string().min(1).max(64),
+      action: z.enum(["dismiss", "handled", "remove", "suspend"]),
+      note: z.string().trim().max(300).default(""),
+    }),
+  ),
+  (req, res) => {
+    const { targetType, targetId, action, note } = req.body;
+    const open = all("SELECT * FROM reports WHERE status = 'open' AND target_type = ? AND target_id = ?", [targetType, targetId]);
+    if (open.length === 0) throw notFound("No open reports about that");
+    const now = reportedNow(targetType, targetId);
+    const what = describeTarget(targetType, now?.label ?? open[0].target_label);
+
+    let resolution;
+    if (action === "remove") {
+      if (targetType === "user") throw badRequest("A person can't be removed — clean up their profile, or suspend them");
+      if (now) {
+        if (targetType === "list") removeList(req, targetId);
+        else removeClub(req, targetId);
+      }
+      resolution = targetType === "list" ? "Removed the list" : "Removed the club";
+    } else if (action === "suspend") {
+      const reasons = [...new Set(open.map((row) => REASON_LABELS[row.reason]))].join(", ");
+      const row = suspendUser(req, open[0].owner_id, `Reported for ${reasons}${note ? ` — ${note}` : ""}`);
+      resolution = `Suspended @${row.handle}`;
+    } else {
+      resolution = action === "dismiss" ? "Dismissed" : "Handled";
+    }
+    if (note && action !== "suspend") resolution += ` — ${note}`;
+
+    run(
+      `UPDATE reports SET status = ?, resolved_at = ?, resolved_by = ?, resolution = ?
+       WHERE status = 'open' AND target_type = ? AND target_id = ?`,
+      [action === "dismiss" ? "dismissed" : "actioned", Date.now(), req.userId, resolution, targetType, targetId],
+    );
+    const reports = `${open.length} ${open.length === 1 ? "report" : "reports"}`;
+    log(
+      req,
+      `report.${action}`,
+      { type: targetType, id: targetId },
+      `${action === "dismiss" ? "Dismissed" : "Closed"} ${reports} about ${what}: ${resolution}`,
+    );
+    res.json({ resolution, open: openCaseCount() });
+  },
+);
+
+// ---- The log -------------------------------------------------------------------
+
+router.get(
+  "/log",
+  validate(z.object({ action: z.string().trim().max(40).optional(), page, limit: limit(100, 50) }), "query"),
+  (req, res) => {
+    const { action, page: pageNumber, limit: size } = req.validQuery;
+    const { entries, total } = listAdminLog({ action: action || undefined, limit: size, offset: (pageNumber - 1) * size });
+    res.json({ entries, page: pageNumber, total, totalPages: Math.max(1, Math.ceil(total / size)) });
+  },
+);
 
 export default router;

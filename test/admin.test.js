@@ -322,6 +322,80 @@ describe("admin", () => {
     assert.equal((await api("DELETE", `/admin/clubs/${clubId}`, { token: boss.token })).status, 204);
   });
 
+  test("reports: from the app, into the queue by target, closed by an action — all in the log", async () => {
+    const reporter = await register("Rita Reporter", "rita");
+    await api("POST", "/friends/requests", { token: reporter.token, body: { userId: regular.user.id } });
+    await api("POST", `/friends/requests/${reporter.user.id}/accept`, { token: regular.token });
+    const list = (await api("POST", "/boards", { token: regular.token, body: { name: "Buy followers here" } })).body.board;
+    const report = (body, token = reporter.token) => api("POST", "/reports", { token, body });
+
+    // Only what you can see, never your own.
+    assert.equal((await report({ targetType: "user", targetId: reporter.user.id, reason: "spam" })).status, 400);
+    assert.equal((await report({ targetType: "list", targetId: list.id, reason: "spam" }, regular.token)).status, 400);
+    assert.equal((await report({ targetType: "club", targetId: "c_nope", reason: "spam" })).status, 404);
+    assert.equal((await report({ targetType: "list", targetId: list.id, reason: "nonsense" })).status, 400);
+
+    const first = await report({ targetType: "list", targetId: list.id, reason: "spam", note: "It's an ad" });
+    assert.equal(first.status, 201, JSON.stringify(first.body));
+    // Again while open: nothing new.
+    const again = await report({ targetType: "list", targetId: list.id, reason: "offensive" });
+    assert.equal(again.status, 200);
+    assert.equal(again.body.alreadyReported, true);
+    assert.equal((await report({ targetType: "user", targetId: regular.user.id, reason: "harassment" })).status, 201);
+
+    // The queue: one case per target, with what it is now.
+    const queue = await api("GET", "/admin/reports", { token: boss.token });
+    assert.equal(queue.status, 200, JSON.stringify(queue.body));
+    assert.equal(queue.body.open, 2);
+    const listCase = queue.body.cases.find((item) => item.targetType === "list");
+    assert.equal(listCase.label, "Buy followers here");
+    assert.equal(listCase.owner.handle, "@regularjoe");
+    assert.equal(listCase.reports[0].note, "It's an ad");
+    assert.equal(listCase.reports[0].reporter.handle, "@rita");
+    assert.equal((await api("GET", "/admin/reports/count", { token: boss.token })).body.open, 2);
+
+    // Close the list's case by removing it; a person can't be "removed".
+    assert.equal(
+      (await api("POST", "/admin/reports/resolve", { token: boss.token, body: { targetType: "user", targetId: regular.user.id, action: "remove" } })).status,
+      400,
+    );
+    const removed = await api("POST", "/admin/reports/resolve", {
+      token: boss.token,
+      body: { targetType: "list", targetId: list.id, action: "remove" },
+    });
+    assert.equal(removed.status, 200, JSON.stringify(removed.body));
+    assert.equal(removed.body.open, 1);
+    assert.deepEqual((await api("GET", "/boards", { token: regular.token })).body.boards, []);
+    const dismissed = await api("POST", "/admin/reports/resolve", {
+      token: boss.token,
+      body: { targetType: "user", targetId: regular.user.id, action: "dismiss", note: "A joke between friends" },
+    });
+    assert.equal(dismissed.body.resolution, "Dismissed — A joke between friends");
+    const history = await api("GET", "/admin/reports?status=actioned", { token: boss.token });
+    assert.equal(history.body.cases[0].resolution, "Removed the list");
+    assert.equal(history.body.cases[0].gone, true);
+    assert.equal(history.body.cases[0].resolvedBy.handle, "@theboss");
+    // Closed: it can be reported again.
+    assert.equal((await report({ targetType: "user", targetId: regular.user.id, reason: "spam" })).status, 201);
+    assert.equal(
+      (await api("POST", "/admin/reports/resolve", { token: boss.token, body: { targetType: "user", targetId: regular.user.id, action: "handled" } })).status,
+      200,
+    );
+
+    // The log: newest first, filterable by kind.
+    const logged = await api("GET", "/admin/log", { token: boss.token });
+    assert.equal(logged.status, 200, JSON.stringify(logged.body));
+    assert.equal(logged.body.entries[0].action, "report.handled");
+    assert.equal(logged.body.entries[0].admin.email, "boss@example.com");
+    assert.ok(logged.body.entries.some((entry) => entry.summary === `Removed @regularjoe's list "Buy followers here"`));
+    assert.ok(logged.body.entries.some((entry) => entry.action === "user.suspend" && entry.summary.startsWith("Suspended @suspect")));
+    const reportsOnly = await api("GET", "/admin/log?action=report", { token: boss.token });
+    assert.ok(reportsOnly.body.entries.every((entry) => entry.action.startsWith("report.")));
+    assert.equal(reportsOnly.body.total, 3);
+
+    assert.equal((await api("DELETE", `/admin/users/${reporter.user.id}`, { token: boss.token })).status, 204);
+  });
+
   test("clubs: list and remove", async () => {
     await api("POST", "/clubs", { token: regular.token, body: { name: "Joe's Club" } });
     const clubs = await api("GET", "/admin/clubs", { token: boss.token });
