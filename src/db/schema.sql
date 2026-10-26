@@ -68,6 +68,10 @@ CREATE TABLE IF NOT EXISTS users (
   level              INTEGER NOT NULL DEFAULT 1,
   top_ten            TEXT NOT NULL DEFAULT '[]',   -- JSON movie ids: the S tier's order, #1 first
   pinned_collections TEXT NOT NULL DEFAULT '[]',   -- JSON collection ids
+  -- Set by an admin: a suspended account can't sign in or use the API, and
+  -- other people don't see it (search, profiles, friends). NULL = active.
+  suspended_at       INTEGER,
+  suspended_reason   TEXT,
   created_at         INTEGER NOT NULL
 );
 
@@ -273,3 +277,41 @@ CREATE TABLE IF NOT EXISTS sagas (
   position   INTEGER NOT NULL,
   definition TEXT NOT NULL              -- JSON
 );
+
+-- Things people reported from the app (a person, one of their lists, a
+-- club), for the admin site's queue. The target's name and owner are kept
+-- as they were, in case it changes or goes. One open report per person per
+-- target.
+CREATE TABLE IF NOT EXISTS reports (
+  id           TEXT PRIMARY KEY,
+  reporter_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
+  target_type  TEXT NOT NULL CHECK (target_type IN ('user','list','club')),
+  target_id    TEXT NOT NULL,
+  owner_id     TEXT,
+  target_label TEXT NOT NULL,
+  reason       TEXT NOT NULL CHECK (reason IN ('spam','offensive','harassment','impersonation','other')),
+  note         TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open','actioned','dismissed')),
+  created_at   INTEGER NOT NULL,
+  resolved_at  INTEGER,
+  resolved_by  TEXT REFERENCES users(id) ON DELETE SET NULL,
+  resolution   TEXT
+);
+CREATE INDEX IF NOT EXISTS reports_by_status ON reports (status, created_at DESC);
+CREATE INDEX IF NOT EXISTS reports_by_target ON reports (target_type, target_id);
+CREATE UNIQUE INDEX IF NOT EXISTS one_open_report
+  ON reports (reporter_id, target_type, target_id) WHERE status = 'open';
+
+-- What admins did on the admin site, newest first. The admin's email is kept
+-- as it was, so the entry still says who after their account is gone.
+CREATE TABLE IF NOT EXISTS admin_log (
+  id          TEXT PRIMARY KEY,
+  admin_id    TEXT REFERENCES users(id) ON DELETE SET NULL,
+  admin_email TEXT NOT NULL,
+  action      TEXT NOT NULL,
+  target_type TEXT,
+  target_id   TEXT,
+  summary     TEXT NOT NULL,
+  created_at  INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS admin_log_by_time ON admin_log (created_at DESC);

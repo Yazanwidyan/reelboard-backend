@@ -7,7 +7,7 @@ import { listBoards } from "../lib/library.js";
 import { moviesFor } from "../lib/movies.js";
 import { notify } from "../lib/push.js";
 import { handle } from "../lib/schemas.js";
-import { areFriends, friendIdsOf, getUserRow, toPublicUser } from "../lib/users.js";
+import { areFriends, friendIdsOf, getUserRow, isSuspended, toPublicUser } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
 
 // Notifications about friend requests open the Friends screen.
@@ -58,9 +58,10 @@ const friendMovies = (friends) =>
 
 const userParam = z.object({ userId: z.string().min(1) });
 
+// Suspended accounts are as good as gone to everyone else.
 const loadUser = (userId) => {
   const row = getUserRow(userId);
-  if (!row) throw notFound("No such user");
+  if (!row || isSuspended(row)) throw notFound("No such user");
   return row;
 };
 
@@ -74,7 +75,8 @@ usersRouter.get(
     const needle = req.validQuery.q.replace(/^@/, "").replace(/[%_\\]/g, "\\$&");
     const users = all(
       `SELECT * FROM users
-       WHERE id <> :me AND (handle LIKE :prefix ESCAPE '\\' OR display_name LIKE :anywhere ESCAPE '\\')
+       WHERE id <> :me AND suspended_at IS NULL
+         AND (handle LIKE :prefix ESCAPE '\\' OR display_name LIKE :anywhere ESCAPE '\\')
        ORDER BY (handle LIKE :prefix ESCAPE '\\') DESC, display_name
        LIMIT 20`,
       { me: req.userId, prefix: `${needle}%`, anywhere: `%${needle}%` },
@@ -152,7 +154,7 @@ friendsRouter.post(
     const target = req.body.userId
       ? getUserRow(req.body.userId)
       : get("SELECT * FROM users WHERE handle = ?", [req.body.handle]);
-    if (!target) throw notFound("No such user");
+    if (!target || isSuspended(target)) throw notFound("No such user");
     if (target.id === req.userId) throw badRequest("You can't friend yourself");
 
     const existing = getFriendship(req.userId, target.id);

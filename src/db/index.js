@@ -159,6 +159,11 @@ const migrate = () => {
   if (!userColumns.has("cover_movie_id")) {
     db.exec("ALTER TABLE users ADD COLUMN cover_movie_id TEXT");
   }
+  // Suspension, by an admin.
+  if (!userColumns.has("suspended_at")) {
+    db.exec("ALTER TABLE users ADD COLUMN suspended_at INTEGER");
+    db.exec("ALTER TABLE users ADD COLUMN suspended_reason TEXT");
+  }
 };
 
 // From data/curation.json: the Taste DNA vocabulary and the clip length.

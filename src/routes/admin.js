@@ -7,9 +7,14 @@ import { readCuration, updateCuration } from "../lib/curation.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { ensureMovie, ensureMovies, getMovieById, resetMovieCache } from "../lib/movies.js";
 import { movieId, TIERS } from "../lib/schemas.js";
+import { listBoards } from "../lib/library.js";
+import { createSagaResolver, resolveRanks } from "../lib/sagaSources.js";
 import { titleName } from "../lib/titles.js";
-import { getUserRow, toProfile } from "../lib/users.js";
+import { IMAGE_BASE, tmdbGet } from "../lib/tmdb.js";
+import { getUserRow, isSuspended, toProfile } from "../lib/users.js";
+import { isAdmin } from "../middleware/admin.js";
 import { validate } from "../middleware/validate.js";
+import { CLUB_DESCRIPTION_MAX, CLUB_NAME_MAX } from "./clubs.js";
 
 // Mounted at /api/admin, behind requireAuth + requireAdmin — the admin site
 // (../Reelboard-admin). Edits to movies and sagas change the live database
@@ -123,10 +128,22 @@ router.get("/stats", (req, res) => {
 
 router.get(
   "/users",
-  validate(z.object({ q: z.string().trim().max(100).default(""), page, limit: limit(100, 25) }), "query"),
+  validate(
+    z.object({
+      q: z.string().trim().max(100).default(""),
+      status: z.enum(["all", "suspended"]).default("all"),
+      page,
+      limit: limit(100, 25),
+    }),
+    "query",
+  ),
   (req, res) => {
-    const { q, page: pageNumber, limit: size } = req.validQuery;
-    const where = q ? "WHERE email LIKE :q ESCAPE '\\' OR handle LIKE :q ESCAPE '\\' OR display_name LIKE :q ESCAPE '\\'" : "";
+    const { q, status, page: pageNumber, limit: size } = req.validQuery;
+    const conditions = [
+      q && "(email LIKE :q ESCAPE '\\' OR handle LIKE :q ESCAPE '\\' OR display_name LIKE :q ESCAPE '\\')",
+      status === "suspended" && "suspended_at IS NOT NULL",
+    ].filter(Boolean);
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
     const params = { q: like(q) };
     const users = allNamed(
       `SELECT users.*,
@@ -147,6 +164,7 @@ router.get(
       createdAt: row.created_at,
       watchedCount: row.watched_count,
       lastActive: row.last_active,
+      suspendedAt: row.suspended_at ?? null,
     }));
     const total = countNamed(`SELECT COUNT(*) AS n FROM users ${where}`, params);
     res.json({ users, page: pageNumber, total, totalPages: Math.ceil(total / size) });
@@ -179,7 +197,86 @@ router.get("/users/:id", userParam, (req, res) => {
     },
     tiers,
     activity: listActivity([id], { limit: 20 }),
+    suspension: isSuspended(row) ? { at: row.suspended_at, reason: row.suspended_reason ?? "" } : null,
+    isAdmin: isAdmin(id),
+    lists: listBoards(id).map((board) => ({
+      id: board.id,
+      name: board.name,
+      movieCount: board.movieIds.length,
+      posters: board.movieIds.slice(0, 4).map((movie) => getMovieById(movie)?.poster ?? null),
+      createdAt: board.createdAt,
+      updatedAt: board.updatedAt,
+    })),
   });
+});
+
+// ---- Moderation ----------------------------------------------------------------
+//
+// Suspending keeps the account and everything in it, but it can't sign in
+// or use the app (its sessions stop working at once), and nobody else sees
+// it — search, profiles, friends and their feeds. Unsuspending brings it all
+// back. Not your own account, nor another admin's.
+
+const moderatable = (id, req) => {
+  const row = getUserRow(id);
+  if (!row) throw notFound("No such user");
+  if (id === req.userId) throw badRequest("You can't do that to your own account");
+  if (isAdmin(id)) throw badRequest("That's an admin account — take it off ADMIN_EMAILS first");
+  return row;
+};
+
+router.post(
+  "/users/:id/suspend",
+  userParam,
+  validate(z.object({ reason: z.string().trim().max(200).default("") })),
+  (req, res) => {
+    moderatable(req.params.id, req);
+    run("UPDATE users SET suspended_at = COALESCE(suspended_at, ?), suspended_reason = ? WHERE id = ?", [
+      Date.now(),
+      req.body.reason,
+      req.params.id,
+    ]);
+    const row = getUserRow(req.params.id);
+    res.json({ suspension: { at: row.suspended_at, reason: row.suspended_reason } });
+  },
+);
+
+router.delete("/users/:id/suspend", userParam, (req, res) => {
+  moderatable(req.params.id, req);
+  run("UPDATE users SET suspended_at = NULL, suspended_reason = NULL WHERE id = ?", [req.params.id]);
+  res.json({ suspension: null });
+});
+
+// Cleans up a profile: `bio` empties it, `avatar` removes the photo, `cover`
+// the cover still, `name` resets the display name to the handle.
+router.post(
+  "/users/:id/clean",
+  userParam,
+  validate(
+    z
+      .object({ bio: z.literal(true), avatar: z.literal(true), cover: z.literal(true), name: z.literal(true) })
+      .partial()
+      .refine((body) => Object.keys(body).length > 0, "Nothing to clean up"),
+  ),
+  (req, res) => {
+    const row = getUserRow(req.params.id);
+    if (!row) throw notFound("No such user");
+    const { bio, avatar, cover, name } = req.body;
+    transaction(() => {
+      if (bio) run("UPDATE users SET bio = '' WHERE id = ?", [row.id]);
+      if (avatar) run("UPDATE users SET avatar_uri = NULL WHERE id = ?", [row.id]);
+      if (cover) run("UPDATE users SET cover_movie_id = NULL WHERE id = ?", [row.id]);
+      if (name) run("UPDATE users SET display_name = handle WHERE id = ?", [row.id]);
+    });
+    res.json({ user: toProfile(getUserRow(row.id)) });
+  },
+);
+
+// Removes someone's list (its films stay in their library).
+router.delete("/boards/:id", validate(z.object({ id: z.string().min(1).max(64) }), "params"), (req, res) => {
+  if (!get("SELECT 1 FROM boards WHERE id = ?", [req.params.id])) throw notFound("No such list");
+  run("DELETE FROM boards WHERE id = ?", [req.params.id]);
+  res.status(204).end();
 });
 
 // Deletes the account and everything in it. Not your own (sign in to the app
@@ -356,11 +453,20 @@ const sagaStats = (saga) => {
   return { started: progress.length, finished: progress.filter((row) => row.n >= saga.movieIds.length).length };
 };
 
-const sagaCard = (movieIds) =>
-  movieIds
-    .map(getMovieById)
-    .filter(Boolean)
-    .map((movie) => ({ id: movie.id, title: movie.title, year: movie.year, poster: movie.poster, inPool: movie.inPool }));
+// A film as the saga editor shows it (its backdrop is a cover choice).
+const filmCard = (movie) => ({
+  id: movie.id,
+  title: movie.title,
+  year: movie.year,
+  poster: movie.poster,
+  backdrop: movie.backdrop ?? null,
+  inPool: movie.inPool,
+});
+const sagaCard = (movieIds) => movieIds.map(getMovieById).filter(Boolean).map(filmCard);
+
+// The curation's entry for a saga (its rule, its ranks as written, its
+// picked artwork), if it has one.
+const curatedSaga = (id) => readCuration().sagas?.find((item) => `saga-${item.id}` === id) ?? null;
 
 router.get("/sagas", (req, res) => {
   res.json({
@@ -373,33 +479,136 @@ const sagaParam = validate(z.object({ id: z.string().regex(/^saga-[a-z0-9-]{1,60
 router.get("/sagas/:id", sagaParam, (req, res) => {
   const saga = readSagas().find((item) => item.id === req.params.id);
   if (!saga) throw notFound("No such saga");
-  const source = readCuration().sagas?.find((item) => `saga-${item.id}` === saga.id)?.from ?? null;
-  res.json({ saga, stats: sagaStats(saga), movies: sagaCard(saga.movieIds), from: source });
+  const curated = curatedSaga(saga.id);
+  res.json({
+    saga,
+    stats: sagaStats(saga),
+    movies: sagaCard(saga.movieIds),
+    from: curated?.from ?? null,
+    curated: curated && { ranks: curated.ranks, art: curated.art ?? null },
+  });
 });
 
-const rank = z.object({ title: z.string().trim().min(1).max(40), at: z.number().int().min(1) });
+// ---- Saga rules: where its films come from, resolved like build-pool does.
+
+const MIN_FILMS = 3;
+const MAX_FILMS = 100;
+const { resolveSaga } = createSagaResolver();
+
+const votes = z.number().int().min(0).max(1_000_000).optional();
+const top = z.number().int().min(MIN_FILMS).max(MAX_FILMS).optional();
+const personName = z.string().trim().min(1).max(80);
+// A rule — not films picked one by one (those are `movieIds`).
+const ruleFrom = z.union([
+  z.object({ tmdbCollections: z.array(z.number().int().positive()).min(1).max(6) }).strict(),
+  z.object({ company: z.number().int().positive(), minVotes: votes }).strict(),
+  z.object({ director: personName, minVotes: votes, top }).strict(),
+  z.object({ actor: personName, minVotes: votes, top }).strict(),
+]);
+
+// A rule's films, fetched (so they have posters): { movieIds, movies, art,
+// person, source }. Films TMDB has no poster for are left out, as build-pool
+// does.
+const resolveRule = async (from) => {
+  const resolved = await resolveSaga({ from });
+  if (resolved.ids.length > MAX_FILMS) {
+    throw badRequest(
+      `That finds ${resolved.ids.length} films; a saga can have ${MAX_FILMS}. Raise the minimum votes, or keep only the best-known.`,
+    );
+  }
+  const movies = (await ensureMovies(resolved.ids.map(String))).filter((movie) => movie.poster);
+  return { movieIds: movies.map((movie) => movie.id), movies, art: resolved.art, person: resolved.person ?? null, source: resolved.source };
+};
+
+// `source` names what the rule found ("Harry Potter Collection", "A24").
+router.post("/sagas/preview", validate(z.object({ from: ruleFrom })), async (req, res) => {
+  const { from } = req.body;
+  const rule = await resolveRule(from);
+  const company = from.company ? await tmdbGet(`/company/${from.company}`) : null;
+  res.json({ movies: rule.movies.map(filmCard), art: rule.art, person: rule.person, source: company?.name ?? rule.source });
+});
+
+// TMDB's own search, for building a rule: collections, studios, people.
+const SEARCHES = { collection: "/search/collection", company: "/search/company", person: "/search/person" };
+const image = (path, size) => (path ? `${IMAGE_BASE}/${size}${path}` : null);
+router.get(
+  "/tmdb/search",
+  validate(z.object({ type: z.enum(["collection", "company", "person"]), q: z.string().trim().min(1).max(80) }), "query"),
+  async (req, res) => {
+    const { type, q } = req.validQuery;
+    const data = await tmdbGet(SEARCHES[type], { query: q, include_adult: "false" });
+    const results = (data?.results ?? []).slice(0, 12).map((item) => ({
+      id: item.id,
+      name: item.name,
+      image: image(item.poster_path ?? item.logo_path ?? item.profile_path, "w185"),
+      ...(type === "collection" ? { backdrop: image(item.backdrop_path, "w780") } : {}),
+      ...(type === "company" ? { country: item.origin_country || null } : {}),
+      ...(type === "person"
+        ? {
+            department: item.known_for_department ?? null,
+            knownFor: (item.known_for ?? []).map((movie) => movie.title ?? movie.name).filter(Boolean).slice(0, 3),
+          }
+        : {}),
+    }));
+    res.json({ results });
+  },
+);
+
+// ---- Saving a saga
+
+// A rank: `at` films, or a `share` of them (0.6 = 60%). The last one always
+// needs every film, whatever it says.
+const rank = z
+  .object({
+    title: z.string().trim().min(1).max(40),
+    at: z.number().int().min(1).optional(),
+    share: z.number().gt(0).lt(1).optional(),
+  })
+  .refine((item) => item.at == null || item.share == null, "A rank needs films or a share, not both");
+const tmdbImage = z.string().url().regex(/^https:\/\/image\.tmdb\.org\//, "Expected a TMDB image");
+// The saga's picture: a backdrop or a person's photo; null = automatic.
+const art = z.union([z.object({ backdrop: tmdbImage }).strict(), z.object({ photo: tmdbImage }).strict()]).nullable();
 const sagaFields = {
   title: z.string().trim().min(1).max(60),
   subtitle: z.string().trim().max(120),
   kind: z.enum(["franchise", "studio", "theme", "director", "actor"]),
+  // Its films: picked one by one, or a rule for them.
   movieIds: z
     .array(movieId)
-    .min(3)
-    .max(100)
-    .refine((ids) => new Set(ids).size === ids.length, "Films must be unique"),
+    .min(MIN_FILMS)
+    .max(MAX_FILMS)
+    .refine((ids) => new Set(ids).size === ids.length, "Films must be unique")
+    .optional(),
+  from: ruleFrom.optional(),
   ranks: z.array(rank).min(1).max(5),
+  art: art.optional(),
 };
 
-// Ranks rising, the last one at every film.
-const checkRanks = (ranks, total) => {
-  const sorted = [...ranks].sort((a, b) => a.at - b.at);
-  sorted.forEach((item, i) => {
+// Ranks as the curation keeps them (`at` a count or "all", or a `share`)
+// and as film counts — in order, each needing more than the one before,
+// the last every film.
+const planRanks = (ranks, total) => {
+  const curated = ranks.map((item, i) =>
+    i === ranks.length - 1
+      ? { title: item.title, at: "all" }
+      : item.share != null
+        ? { title: item.title, share: item.share }
+        : { title: item.title, at: item.at ?? 1 },
+  );
+  const counts = resolveExactRanks(curated, total);
+  counts.forEach((item, i) => {
     if (item.at > total) throw badRequest(`"${item.title}" needs ${item.at} films — the saga has ${total}`);
-    if (i > 0 && item.at === sorted[i - 1].at) throw badRequest("Two ranks can't need the same number of films");
+    if (i > 0 && item.at <= counts[i - 1].at) {
+      throw badRequest(`"${item.title}" has to need more films than "${counts[i - 1].title}"`);
+    }
   });
-  sorted[sorted.length - 1] = { ...sorted[sorted.length - 1], at: total };
-  return sorted;
+  return { curated, counts };
 };
+const resolveExactRanks = (curated, total) =>
+  curated.map((item) => ({
+    title: item.title,
+    at: item.at === "all" ? total : item.share != null ? Math.max(1, Math.ceil(item.share * total)) : item.at,
+  }));
 
 // The films, all of them in the pool (added if they weren't).
 const poolFilms = async (movieIds) => {
@@ -426,6 +635,21 @@ const poolFilms = async (movieIds) => {
   return movies;
 };
 
+// A saga's films from what was sent — a rule, or films picked here:
+// { movieIds, movies, from, ruleArt, person }, every film in the pool.
+const sagaFilms = async ({ from, movieIds }) => {
+  if (from) {
+    const rule = await resolveRule(from);
+    if (rule.movieIds.length < MIN_FILMS) {
+      throw badRequest(`That finds ${rule.movieIds.length} films; a saga needs at least ${MIN_FILMS}`);
+    }
+    const movies = await poolFilms(rule.movieIds);
+    return { movieIds: rule.movieIds, movies, from, ruleArt: rule.art, person: rule.person };
+  }
+  if (!movieIds) throw badRequest("Pick its films, or a rule for them");
+  return { movieIds, movies: await poolFilms(movieIds), from: { ids: movieIds }, ruleArt: null, person: null };
+};
+
 // The best-known film's backdrop, for a saga without its own artwork.
 const fallbackArt = (movies) => {
   const backdrop = [...movies]
@@ -434,17 +658,18 @@ const fallbackArt = (movies) => {
   return backdrop ? { backdrop } : null;
 };
 
-// The curation's version of a saga: ranks as counts, the top one "all";
-// the films as picked ids, or its old `from` if they didn't change. An
-// actor's or a director's saga with picked films keeps who it's about.
-const toCurated = (saga, from) => ({
+// The curation's version of a saga: its rule (or picked ids), its ranks as
+// written, and its artwork if one was picked. An actor's or a director's
+// saga with picked films keeps who it's about.
+const toCurated = (saga, { from, ranks, art: picked }) => ({
   id: saga.id.replace(/^saga-/, ""),
   title: saga.title,
   subtitle: saga.subtitle,
   kind: saga.kind,
   from,
   ...(saga.person && from.ids ? { person: saga.person } : {}),
-  ranks: saga.ranks.map((item, i, list) => ({ title: item.title, at: i === list.length - 1 ? "all" : item.at })),
+  ...(picked ? { art: picked } : {}),
+  ranks,
 });
 
 const saveSagas = (sagas) => {
@@ -456,22 +681,25 @@ router.post(
   "/sagas",
   validate(z.object({ id: z.string().regex(/^[a-z0-9-]{2,60}$/), ...sagaFields, subtitle: sagaFields.subtitle.default("") })),
   async (req, res) => {
-    const { id, title, subtitle, kind, movieIds, ranks } = req.body;
+    const { id, title, subtitle, kind, ranks } = req.body;
     const sagas = readSagas();
     if (sagas.some((saga) => saga.id === `saga-${id}`)) throw badRequest("A saga with that id exists");
-    const movies = await poolFilms(movieIds);
+    const films = await sagaFilms(req.body);
+    const plan = planRanks(ranks, films.movieIds.length);
+    const picked = req.body.art ?? null;
     const saga = {
       id: `saga-${id}`,
       type: SAGA,
       kind,
       title,
       subtitle,
-      movieIds,
-      ranks: checkRanks(ranks, movieIds.length),
-      art: fallbackArt(movies),
+      movieIds: films.movieIds,
+      ranks: plan.counts,
+      art: picked ?? films.ruleArt ?? fallbackArt(films.movies),
+      ...(films.person ? { person: films.person } : {}),
     };
     updateCuration((curation) => {
-      curation.sagas = [...(curation.sagas ?? []), toCurated(saga, { ids: movieIds })];
+      curation.sagas = [...(curation.sagas ?? []), toCurated(saga, { from: films.from, ranks: plan.curated, art: picked })];
     });
     saveSagas([...sagas, saga]);
     res.status(201).json({ saga, stats: sagaStats(saga), movies: sagaCard(saga.movieIds) });
@@ -493,29 +721,60 @@ router.patch(
     if (index === -1) throw notFound("No such saga");
     const current = sagas[index];
     const changes = req.body;
-    const movieIds = changes.movieIds ?? current.movieIds;
-    if (changes.movieIds) await poolFilms(changes.movieIds);
-    const filmsChanged = movieIds.join() !== current.movieIds.join();
+    const curated = curatedSaga(current.id);
+
+    // Its films: a new rule, new picks, or as they were. Picks that match
+    // the films it has keep the rule they came from.
+    let from = curated?.from ?? { ids: current.movieIds };
+    let movieIds = current.movieIds;
+    let ruleArt = null;
     // Who it's about (sagas built before build-pool stored it: from the
     // curation), kept when its films become a picked list.
-    const curated = readCuration().sagas?.find((item) => `saga-${item.id}` === current.id);
-    const person = current.person ?? curated?.from?.actor ?? curated?.from?.director ?? curated?.person;
+    let person = current.person ?? curated?.from?.actor ?? curated?.from?.director ?? curated?.person;
+    if (changes.from || changes.movieIds) {
+      const films = await sagaFilms(changes);
+      if (changes.from || films.movieIds.join() !== current.movieIds.join()) {
+        ({ from, movieIds, ruleArt } = films);
+        person = films.person ?? person;
+      }
+    }
+    const filmsChanged = movieIds.join() !== current.movieIds.join();
+
+    // Its ranks: new ones checked strictly; the ones it has re-counted when
+    // its films changed (a smaller saga keeps its higher ranks).
+    const written =
+      curated?.ranks ??
+      current.ranks.map((item, i, list) => ({ title: item.title, at: i === list.length - 1 ? "all" : item.at }));
+    const plan = changes.ranks
+      ? planRanks(changes.ranks, movieIds.length)
+      : { curated: written, counts: filmsChanged ? resolveRanks(written, movieIds.length) : current.ranks };
+
+    // Its picture: the one picked, or worked out again when its films or
+    // the pick changed.
+    const picked = changes.art !== undefined ? changes.art : (curated?.art ?? null);
+    let sagaArt = current.art;
+    if (picked) sagaArt = picked;
+    else if (filmsChanged || changes.from || changes.art === null) {
+      if (!ruleArt && !from.ids && !from.movies) ruleArt = (await resolveRule(from)).art;
+      sagaArt = ruleArt ?? fallbackArt(movieIds.map(getMovieById).filter(Boolean));
+    }
+
     const saga = {
       ...current,
+      title: changes.title ?? current.title,
+      subtitle: changes.subtitle ?? current.subtitle,
+      kind: changes.kind ?? current.kind,
       ...(person ? { person } : {}),
-      ...changes,
       movieIds,
-      ranks: checkRanks(
-        changes.ranks ?? (filmsChanged ? current.ranks.filter((item) => item.at <= movieIds.length) : current.ranks),
-        movieIds.length,
-      ),
+      ranks: plan.counts,
+      art: sagaArt,
     };
     updateCuration((curation) => {
       const list = curation.sagas ?? [];
       const at = list.findIndex((item) => `saga-${item.id}` === saga.id);
-      const from = filmsChanged || at === -1 ? { ids: movieIds } : list[at].from;
-      if (at === -1) list.push(toCurated(saga, from));
-      else list[at] = toCurated(saga, from);
+      const entry = toCurated(saga, { from, ranks: plan.curated, art: picked });
+      if (at === -1) list.push(entry);
+      else list[at] = entry;
       curation.sagas = list;
     });
     sagas[index] = saga;
@@ -563,7 +822,102 @@ router.get(
   },
 );
 
-router.delete("/clubs/:id", validate(z.object({ id: z.string().min(1).max(64) }), "params"), (req, res) => {
+const clubParam = validate(z.object({ id: z.string().min(1).max(64) }), "params");
+const loadClub = (id) => {
+  const club = get("SELECT * FROM clubs WHERE id = ?", [id]);
+  if (!club) throw notFound("No such club");
+  return club;
+};
+
+// A club whole: its name and description, members, and the films on its
+// shared board (who added each).
+router.get("/clubs/:id", clubParam, (req, res) => {
+  const club = loadClub(req.params.id);
+  const members = all(
+    `SELECT users.id, users.display_name, users.handle, users.color, users.avatar_uri, users.suspended_at,
+            club_members.role, club_members.joined_at
+     FROM club_members JOIN users ON users.id = club_members.user_id
+     WHERE club_members.club_id = ? ORDER BY club_members.role = 'owner' DESC, club_members.joined_at`,
+    [club.id],
+  ).map((row) => ({
+    id: row.id,
+    name: row.display_name,
+    handle: `@${row.handle}`,
+    color: row.color,
+    avatarUri: row.avatar_uri,
+    role: row.role,
+    joinedAt: row.joined_at,
+    suspended: row.suspended_at != null,
+  }));
+  const movies = all(
+    `SELECT club_movies.movie_id, club_movies.added_at, users.display_name AS added_by_name, users.handle AS added_by_handle
+     FROM club_movies LEFT JOIN users ON users.id = club_movies.added_by
+     WHERE club_movies.club_id = ? ORDER BY club_movies.added_at DESC, club_movies.rowid DESC`,
+    [club.id],
+  ).map((row) => {
+    const movie = getMovieById(row.movie_id);
+    return {
+      id: row.movie_id,
+      title: movie?.title ?? `Movie ${row.movie_id}`,
+      year: movie?.year ?? null,
+      poster: movie?.poster ?? null,
+      addedAt: row.added_at,
+      addedBy: row.added_by_handle ? { name: row.added_by_name, handle: `@${row.added_by_handle}` } : null,
+    };
+  });
+  res.json({
+    club: {
+      id: club.id,
+      name: club.name,
+      description: club.description,
+      ownerId: club.owner_id,
+      nowWatchingId: club.now_watching_movie_id,
+      createdAt: club.created_at,
+    },
+    members,
+    movies,
+  });
+});
+
+// Rename it or change (or empty) its description.
+router.patch(
+  "/clubs/:id",
+  clubParam,
+  validate(
+    z
+      .object({ name: z.string().trim().min(1).max(CLUB_NAME_MAX), description: z.string().trim().max(CLUB_DESCRIPTION_MAX) })
+      .partial()
+      .refine((body) => Object.keys(body).length > 0, "Nothing to change"),
+  ),
+  (req, res) => {
+    const club = loadClub(req.params.id);
+    const { name, description } = req.body;
+    transaction(() => {
+      if (name !== undefined) run("UPDATE clubs SET name = ? WHERE id = ?", [name, club.id]);
+      if (description !== undefined) run("UPDATE clubs SET description = ? WHERE id = ?", [description, club.id]);
+    });
+    const updated = loadClub(club.id);
+    res.json({ club: { id: updated.id, name: updated.name, description: updated.description } });
+  },
+);
+
+// Takes a film off a club's board (and off "now watching", if it was).
+router.delete(
+  "/clubs/:id/movies/:movieId",
+  validate(z.object({ id: z.string().min(1).max(64), movieId }), "params"),
+  (req, res) => {
+    const club = loadClub(req.params.id);
+    transaction(() => {
+      run("DELETE FROM club_movies WHERE club_id = ? AND movie_id = ?", [club.id, req.params.movieId]);
+      if (club.now_watching_movie_id === req.params.movieId) {
+        run("UPDATE clubs SET now_watching_movie_id = NULL, now_watching_set_at = NULL WHERE id = ?", [club.id]);
+      }
+    });
+    res.status(204).end();
+  },
+);
+
+router.delete("/clubs/:id", clubParam, (req, res) => {
   run("DELETE FROM clubs WHERE id = ?", [req.params.id]);
   res.status(204).end();
 });

@@ -3,11 +3,11 @@ import crypto from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { get, run, toJSON, transaction } from "../db/index.js";
-import { conflict, unauthorized } from "../lib/errors.js";
+import { conflict, forbidden, unauthorized } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { DEFAULT_PREFERENCES, handle } from "../lib/schemas.js";
 import { verifiers } from "../lib/social.js";
-import { getUserRow, pickColor, toProfile } from "../lib/users.js";
+import { getUserRow, isSuspended, pickColor, SUSPENDED_MESSAGE, toProfile } from "../lib/users.js";
 import { requireAuth, signToken } from "../middleware/auth.js";
 import { validate } from "../middleware/validate.js";
 
@@ -73,6 +73,12 @@ const createUser = ({ emailAddress, passwordHash, hasPassword = true, displayNam
   return id;
 };
 
+// A suspended account gets no session (its old tokens stop working too:
+// middleware/auth).
+const refuseSuspended = (userId) => {
+  if (isSuspended(getUserRow(userId))) throw forbidden(SUSPENDED_MESSAGE);
+};
+
 router.post("/register", validate(registerSchema), async (req, res) => {
   const { email: emailAddress, password: plain, displayName, handle: wanted } = req.body;
   if (get("SELECT 1 FROM users WHERE email = ?", [emailAddress])) {
@@ -92,6 +98,7 @@ router.post("/login", validate(loginSchema), async (req, res) => {
     throw unauthorized("This account signs in with Google or Apple — use that button instead");
   }
   if (!user || !ok) throw unauthorized("Wrong email or password");
+  refuseSuspended(user.id);
   res.json(session(user.id));
 });
 
@@ -145,6 +152,7 @@ router.post(
   validate(z.object({ idToken: z.string().min(1).max(5000) })),
   async (req, res) => {
     const { userId, isNew } = await signInWithProvider("google", req.body.idToken);
+    refuseSuspended(userId);
     res.status(isNew ? 201 : 200).json({ ...session(userId), isNew });
   },
 );
@@ -164,6 +172,7 @@ router.post(
       req.body.identityToken,
       req.body.fullName,
     );
+    refuseSuspended(userId);
     res.status(isNew ? 201 : 200).json({ ...session(userId), isNew });
   },
 );

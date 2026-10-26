@@ -2,6 +2,7 @@ import jwt from "jsonwebtoken";
 import config from "../config.js";
 import { get } from "../db/index.js";
 import { unauthorized } from "../lib/errors.js";
+import { SUSPENDED_MESSAGE } from "../lib/users.js";
 
 export const signToken = (userId) =>
   jwt.sign({ sub: userId }, config.jwtSecret, { expiresIn: config.jwtExpiresIn });
@@ -18,10 +19,10 @@ export const requireAuth = (req, res, next) => {
   } catch {
     return next(unauthorized("Session expired or invalid — sign in again"));
   }
-  // A token can outlive its account.
-  if (!get("SELECT 1 FROM users WHERE id = ?", [payload.sub])) {
-    return next(unauthorized("Account no longer exists"));
-  }
+  // A token can outlive its account — or its account can be suspended.
+  const user = get("SELECT suspended_at FROM users WHERE id = ?", [payload.sub]);
+  if (!user) return next(unauthorized("Account no longer exists"));
+  if (user.suspended_at != null) return next(unauthorized(SUSPENDED_MESSAGE));
   req.userId = payload.sub;
   next();
 };

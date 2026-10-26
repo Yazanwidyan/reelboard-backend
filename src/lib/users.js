@@ -49,11 +49,19 @@ export const toProfile = (row) => ({
 
 export const getUserRow = (userId) => get("SELECT * FROM users WHERE id = ?", [userId]);
 
+// What a suspended account is told when it tries to sign in or use the app.
+export const SUSPENDED_MESSAGE = "This account is suspended";
+export const isSuspended = (row) => row?.suspended_at != null;
+
+// Your friends — leaving out suspended accounts, which nobody sees.
 export const friendIdsOf = (userId) =>
   all(
-    `SELECT CASE WHEN requester_id = :me THEN addressee_id ELSE requester_id END AS id
-     FROM friendships
-     WHERE status = 'accepted' AND (requester_id = :me OR addressee_id = :me)`,
+    `SELECT friend.id FROM (
+       SELECT CASE WHEN requester_id = :me THEN addressee_id ELSE requester_id END AS id
+       FROM friendships
+       WHERE status = 'accepted' AND (requester_id = :me OR addressee_id = :me)
+     ) AS friend JOIN users ON users.id = friend.id
+     WHERE users.suspended_at IS NULL`,
     { me: userId },
   ).map((row) => row.id);
 

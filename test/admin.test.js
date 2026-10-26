@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, test } from "node:test";
 import zlib from "node:zlib";
-import { FAKE_MOVIE_ID, startFakeTmdb } from "./fakeTmdb.js";
+import { FAKE_COLLECTION_ID, FAKE_MOVIE_ID, startFakeTmdb } from "./fakeTmdb.js";
 
 // The admin API (/api/admin), against the test pool, a fake TMDB and a copy
 // of data/curation.json — the admin site writes curation, and the real file
@@ -216,6 +216,110 @@ describe("admin", () => {
     assert.equal((await api("DELETE", "/admin/sagas/saga-nolan-starter", { token: boss.token })).status, 204);
     assert.ok(!curation().sagas.some((item) => item.id === "nolan-starter"));
     assert.equal(await ranks(), ranksBefore);
+  });
+
+  test("sagas: rules previewed from TMDB, ranks by share, a picked cover", async () => {
+    const preview = await api("POST", "/admin/sagas/preview", {
+      token: boss.token,
+      body: { from: { tmdbCollections: [Number(FAKE_COLLECTION_ID)] } },
+    });
+    assert.equal(preview.status, 200, JSON.stringify(preview.body));
+    assert.equal(preview.body.source, "The Fake Collection");
+    assert.ok(preview.body.movies.some((movie) => movie.id === FAKE_MOVIE_ID));
+    // Films picked one by one aren't a rule.
+    assert.equal((await api("POST", "/admin/sagas/preview", { token: boss.token, body: { from: { ids: ["1"] } } })).status, 400);
+
+    const people = await api("GET", "/admin/tmdb/search?type=person&q=dee", { token: boss.token });
+    assert.equal(people.status, 200, JSON.stringify(people.body));
+    assert.equal(people.body.results[0].name, "Dee Director");
+    assert.ok(people.body.results[0].image.startsWith("https://image.tmdb.org/"));
+
+    const cover = { backdrop: "https://image.tmdb.org/t/p/w1280/picked.jpg" };
+    const edited = await api("PATCH", `/admin/sagas/${SAGA.id}`, {
+      token: boss.token,
+      body: { ranks: [{ title: "Citizen", share: 0.5 }, { title: "Gotham's Guardian" }], art: cover },
+    });
+    assert.equal(edited.status, 200, JSON.stringify(edited.body));
+    assert.deepEqual(edited.body.saga.ranks.map((rank) => rank.at), [2, 3]);
+    assert.deepEqual(edited.body.saga.art, cover);
+    const curated = () => curation().sagas.find((item) => item.id === "gothams-guardian");
+    assert.deepEqual(curated().ranks, [{ title: "Citizen", share: 0.5 }, { title: "Gotham's Guardian", at: "all" }]);
+    assert.deepEqual(curated().art, cover);
+    // Back to automatic: the pick is forgotten.
+    const automatic = await api("PATCH", `/admin/sagas/${SAGA.id}`, { token: boss.token, body: { art: null } });
+    assert.equal(automatic.status, 200, JSON.stringify(automatic.body));
+    assert.notDeepEqual(automatic.body.saga.art, cover);
+    assert.equal(curated().art, undefined);
+    // Images from anywhere but TMDB are refused.
+    assert.equal(
+      (await api("PATCH", `/admin/sagas/${SAGA.id}`, { token: boss.token, body: { art: { backdrop: "https://example.com/x.jpg" } } })).status,
+      400,
+    );
+  });
+
+  test("suspend: no sign-in, no sessions, hidden from others — until unsuspended", async () => {
+    const suspect = await register("Sus Pect", "suspect");
+    await api("POST", "/friends/requests", { token: suspect.token, body: { userId: regular.user.id } });
+    await api("POST", `/friends/requests/${suspect.user.id}/accept`, { token: regular.token });
+    const friendIds = async () => (await api("GET", "/friends", { token: regular.token })).body.friends.map((friend) => friend.id);
+    assert.deepEqual(await friendIds(), [suspect.user.id]);
+
+    // Not yourself, not another admin.
+    assert.equal((await api("POST", `/admin/users/${boss.user.id}/suspend`, { token: boss.token, body: {} })).status, 400);
+
+    const suspended = await api("POST", `/admin/users/${suspect.user.id}/suspend`, { token: boss.token, body: { reason: "Spam lists" } });
+    assert.equal(suspended.status, 200, JSON.stringify(suspended.body));
+    assert.equal(suspended.body.suspension.reason, "Spam lists");
+    // Its session stops working, and it can't sign in again.
+    assert.equal((await api("GET", "/me", { token: suspect.token })).status, 401);
+    const login = await api("POST", "/auth/login", { body: { email: "suspect@example.com", password: "password123" } });
+    assert.equal(login.status, 403);
+    assert.match(login.body.error.message, /suspended/);
+    // Nobody else sees it.
+    assert.deepEqual((await api("GET", "/users/search?q=suspect", { token: regular.token })).body.users, []);
+    assert.equal((await api("GET", `/users/${suspect.user.id}`, { token: regular.token })).status, 404);
+    assert.deepEqual(await friendIds(), []);
+    // The admin does: in the list (filtered too) and on its page.
+    const list = await api("GET", "/admin/users?status=suspended", { token: boss.token });
+    assert.deepEqual(list.body.users.map((user) => user.handle), ["@suspect"]);
+    const detail = await api("GET", `/admin/users/${suspect.user.id}`, { token: boss.token });
+    assert.equal(detail.body.suspension.reason, "Spam lists");
+
+    assert.equal((await api("DELETE", `/admin/users/${suspect.user.id}/suspend`, { token: boss.token })).status, 200);
+    assert.equal((await api("POST", "/auth/login", { body: { email: "suspect@example.com", password: "password123" } })).status, 200);
+    assert.deepEqual(await friendIds(), [suspect.user.id], "friendships come back");
+    assert.equal((await api("DELETE", `/admin/users/${suspect.user.id}`, { token: boss.token })).status, 204);
+  });
+
+  test("content: clean a profile, remove a list, a club's film and description", async () => {
+    await api("PATCH", "/me/profile", { token: regular.token, body: { bio: "Buy followers at spam.example", avatarUri: "https://example.com/a.jpg" } });
+    const cleaned = await api("POST", `/admin/users/${regular.user.id}/clean`, { token: boss.token, body: { bio: true, avatar: true, name: true } });
+    assert.equal(cleaned.status, 200, JSON.stringify(cleaned.body));
+    assert.equal(cleaned.body.user.bio, "");
+    assert.equal(cleaned.body.user.avatarUri, null);
+    assert.equal(cleaned.body.user.displayName, "regularjoe");
+    assert.equal((await api("POST", `/admin/users/${regular.user.id}/clean`, { token: boss.token, body: {} })).status, 400);
+
+    const list = await api("POST", "/boards", { token: regular.token, body: { name: "Rude name", movieIds: ["155"] } });
+    const detail = await api("GET", `/admin/users/${regular.user.id}`, { token: boss.token });
+    assert.deepEqual(detail.body.lists.map((item) => [item.name, item.movieCount]), [["Rude name", 1]]);
+    assert.equal((await api("DELETE", `/admin/boards/${list.body.board.id}`, { token: boss.token })).status, 204);
+    assert.deepEqual((await api("GET", "/boards", { token: regular.token })).body.boards, []);
+    assert.equal((await api("DELETE", `/admin/boards/${list.body.board.id}`, { token: boss.token })).status, 404);
+
+    const created = await api("POST", "/clubs", { token: regular.token, body: { name: "Spam Club", description: "Click here" } });
+    const clubId = created.body.club.id;
+    await api("POST", `/clubs/${clubId}/movies`, { token: regular.token, body: { movieId: "155" } });
+    const club = await api("GET", `/admin/clubs/${clubId}`, { token: boss.token });
+    assert.equal(club.status, 200, JSON.stringify(club.body));
+    assert.equal(club.body.members[0].role, "owner");
+    assert.equal(club.body.movies[0].addedBy.handle, "@regularjoe");
+    assert.equal((await api("DELETE", `/admin/clubs/${clubId}/movies/155`, { token: boss.token })).status, 204);
+    const patched = await api("PATCH", `/admin/clubs/${clubId}`, { token: boss.token, body: { description: "" } });
+    assert.equal(patched.body.club.description, "");
+    const after_ = (await api("GET", `/admin/clubs/${clubId}`, { token: boss.token })).body;
+    assert.deepEqual(after_.movies, []);
+    assert.equal((await api("DELETE", `/admin/clubs/${clubId}`, { token: boss.token })).status, 204);
   });
 
   test("clubs: list and remove", async () => {
