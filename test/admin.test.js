@@ -291,7 +291,7 @@ describe("admin", () => {
     assert.equal((await api("DELETE", `/admin/users/${suspect.user.id}`, { token: boss.token })).status, 204);
   });
 
-  test("content: clean a profile, remove a list, a club's film and description", async () => {
+  test("content: clean a profile, remove a list", async () => {
     await api("PATCH", "/me/profile", { token: regular.token, body: { bio: "Buy followers at spam.example", avatarUri: "https://example.com/a.jpg" } });
     const cleaned = await api("POST", `/admin/users/${regular.user.id}/clean`, { token: boss.token, body: { bio: true, avatar: true, name: true } });
     assert.equal(cleaned.status, 200, JSON.stringify(cleaned.body));
@@ -307,19 +307,6 @@ describe("admin", () => {
     assert.deepEqual((await api("GET", "/boards", { token: regular.token })).body.boards, []);
     assert.equal((await api("DELETE", `/admin/boards/${list.body.board.id}`, { token: boss.token })).status, 404);
 
-    const created = await api("POST", "/clubs", { token: regular.token, body: { name: "Spam Club", description: "Click here" } });
-    const clubId = created.body.club.id;
-    await api("POST", `/clubs/${clubId}/movies`, { token: regular.token, body: { movieId: "155" } });
-    const club = await api("GET", `/admin/clubs/${clubId}`, { token: boss.token });
-    assert.equal(club.status, 200, JSON.stringify(club.body));
-    assert.equal(club.body.members[0].role, "owner");
-    assert.equal(club.body.movies[0].addedBy.handle, "@regularjoe");
-    assert.equal((await api("DELETE", `/admin/clubs/${clubId}/movies/155`, { token: boss.token })).status, 204);
-    const patched = await api("PATCH", `/admin/clubs/${clubId}`, { token: boss.token, body: { description: "" } });
-    assert.equal(patched.body.club.description, "");
-    const after_ = (await api("GET", `/admin/clubs/${clubId}`, { token: boss.token })).body;
-    assert.deepEqual(after_.movies, []);
-    assert.equal((await api("DELETE", `/admin/clubs/${clubId}`, { token: boss.token })).status, 204);
   });
 
   test("reports: from the app, into the queue by target, closed by an action — all in the log", async () => {
@@ -332,7 +319,7 @@ describe("admin", () => {
     // Only what you can see, never your own.
     assert.equal((await report({ targetType: "user", targetId: reporter.user.id, reason: "spam" })).status, 400);
     assert.equal((await report({ targetType: "list", targetId: list.id, reason: "spam" }, regular.token)).status, 400);
-    assert.equal((await report({ targetType: "club", targetId: "c_nope", reason: "spam" })).status, 404);
+    assert.equal((await report({ targetType: "club", targetId: "c_nope", reason: "spam" })).status, 400, "clubs are gone");
     assert.equal((await report({ targetType: "list", targetId: list.id, reason: "nonsense" })).status, 400);
 
     const first = await report({ targetType: "list", targetId: list.id, reason: "spam", note: "It's an ad" });
@@ -432,16 +419,7 @@ describe("admin", () => {
     for (const person of [fan, pal]) await api("DELETE", `/admin/users/${person.user.id}`, { token: boss.token });
   });
 
-  test("clubs: list and remove", async () => {
-    await api("POST", "/clubs", { token: regular.token, body: { name: "Joe's Club" } });
-    const clubs = await api("GET", "/admin/clubs", { token: boss.token });
-    assert.equal(clubs.body.clubs.length, 1);
-    assert.equal(clubs.body.clubs[0].owner.handle, "@regularjoe");
-    assert.equal(clubs.body.clubs[0].memberCount, 1);
-    assert.equal((await api("DELETE", `/admin/clubs/${clubs.body.clubs[0].id}`, { token: boss.token })).status, 204);
-    assert.deepEqual((await api("GET", "/clubs", { token: regular.token })).body.clubs, []);
-
-    // And a user can be deleted.
+  test("a user can be deleted", async () => {
     assert.equal((await api("DELETE", `/admin/users/${regular.user.id}`, { token: boss.token })).status, 204);
     assert.equal((await api("GET", "/admin/stats", { token: boss.token })).body.users.total, 1);
   });

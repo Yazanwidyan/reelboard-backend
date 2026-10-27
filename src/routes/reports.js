@@ -7,10 +7,9 @@ import { areFriends, getUserRow, isSuspended } from "../lib/users.js";
 import { rateLimit } from "../middleware/rateLimit.js";
 import { validate } from "../middleware/validate.js";
 
-// Mounted at /api/reports — reporting a person, one of their lists, or a
-// club, for an admin to look at (the admin site's Reports queue). You can
-// only report what you can see: anyone you can find, a friend's list, a
-// club you're in (not your own things).
+// Mounted at /api/reports — reporting a person or one of their lists, for
+// an admin to look at (the admin site's Reports queue). You can only report
+// what you can see: anyone you can find, a friend's list (not your own).
 const router = Router();
 
 export const REPORT_REASONS = ["spam", "offensive", "harassment", "impersonation", "other"];
@@ -30,11 +29,7 @@ const findTarget = (type, id, me) => {
     if (board.user_id === me) throw badRequest("That's your own list");
     return { label: board.name, ownerId: board.user_id };
   }
-  const club = get("SELECT id, name, owner_id FROM clubs WHERE id = ?", [id]);
-  const member = club && get("SELECT 1 FROM club_members WHERE club_id = ? AND user_id = ?", [club.id, me]);
-  if (!member) throw notFound("No such club");
-  if (club.owner_id === me) throw badRequest("That's your own club");
-  return { label: club.name, ownerId: club.owner_id };
+  throw notFound("Nothing to report");
 };
 
 // POST /api/reports — { targetType, targetId, reason, note }. Reporting the
@@ -44,7 +39,7 @@ router.post(
   rateLimit({ windowMs: 60 * 60 * 1000, max: 20 }),
   validate(
     z.object({
-      targetType: z.enum(["user", "list", "club"]),
+      targetType: z.enum(["user", "list"]),
       targetId: z.string().min(1).max(64),
       reason: z.enum(REPORT_REASONS),
       note: z.string().trim().max(NOTE_MAX).default(""),

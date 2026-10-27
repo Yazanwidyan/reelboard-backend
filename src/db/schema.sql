@@ -243,38 +243,6 @@ CREATE TABLE IF NOT EXISTS push_tokens (
 );
 CREATE INDEX IF NOT EXISTS push_tokens_by_user ON push_tokens (user_id);
 
--- Clubs: a group with a shared board, a "now watching" pick set by the
--- owner, and a feed of what members do with the club's movies. Joined by
--- invite code only — clubs aren't listed or searchable.
-CREATE TABLE IF NOT EXISTS clubs (
-  id                     TEXT PRIMARY KEY,
-  name                   TEXT NOT NULL,
-  description            TEXT NOT NULL DEFAULT '',
-  owner_id               TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  invite_code            TEXT NOT NULL UNIQUE,
-  now_watching_movie_id  TEXT REFERENCES movies(id),
-  now_watching_set_at    INTEGER,
-  created_at             INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS club_members (
-  club_id   TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
-  user_id   TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  role      TEXT NOT NULL CHECK (role IN ('owner','member')),
-  joined_at INTEGER NOT NULL,
-  PRIMARY KEY (club_id, user_id)
-);
-CREATE INDEX IF NOT EXISTS club_members_by_user ON club_members (user_id);
-
--- The club's shared board, oldest first.
-CREATE TABLE IF NOT EXISTS club_movies (
-  club_id  TEXT NOT NULL REFERENCES clubs(id) ON DELETE CASCADE,
-  movie_id TEXT NOT NULL REFERENCES movies(id),
-  added_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-  added_at INTEGER NOT NULL,
-  PRIMARY KEY (club_id, movie_id)
-);
-
 -- The sagas: data/curation.json's hand-made collections, turned into movie
 -- ids, rank thresholds and artwork by `npm run build-pool`. One row each,
 -- in the curation's order; `definition` is the collection as the app gets
@@ -285,8 +253,8 @@ CREATE TABLE IF NOT EXISTS sagas (
   definition TEXT NOT NULL              -- JSON
 );
 
--- Things people reported from the app (a person, one of their lists, a
--- club), for the admin site's queue. The target's name and owner are kept
+-- Things people reported from the app (a person, one of their lists — and,
+-- before clubs were taken out, a club), for the admin site's queue. The target's name and owner are kept
 -- as they were, in case it changes or goes. One open report per person per
 -- target.
 CREATE TABLE IF NOT EXISTS reports (

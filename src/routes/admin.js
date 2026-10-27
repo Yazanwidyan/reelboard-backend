@@ -16,7 +16,6 @@ import { isPro } from "../lib/pro.js";
 import { getUserRow, isSuspended, toProfile } from "../lib/users.js";
 import { isAdmin } from "../middleware/admin.js";
 import { validate } from "../middleware/validate.js";
-import { CLUB_DESCRIPTION_MAX, CLUB_NAME_MAX } from "./clubs.js";
 
 // Mounted at /api/admin, behind requireAuth + requireAdmin — the admin site
 // (../Reelboard-admin). Edits to movies and sagas change the live database
@@ -108,7 +107,6 @@ router.get("/stats", (req, res) => {
       tiered: count("SELECT COUNT(*) AS n FROM watched WHERE tier IS NOT NULL"),
       watchlist: count("SELECT COUNT(*) AS n FROM watchlist"),
       boards: count("SELECT COUNT(*) AS n FROM boards"),
-      clubs: count("SELECT COUNT(*) AS n FROM clubs"),
       friendships: count("SELECT COUNT(*) AS n FROM friendships WHERE status = 'accepted'"),
       poolMovies: count("SELECT COUNT(*) AS n FROM movies WHERE in_pool = 1"),
       otherMovies: count("SELECT COUNT(*) AS n FROM movies WHERE in_pool = 0"),
@@ -196,7 +194,6 @@ router.get("/users/:id", userParam, (req, res) => {
       watched: count("SELECT COUNT(*) AS n FROM watched WHERE user_id = ?", [id]),
       watchlist: count("SELECT COUNT(*) AS n FROM watchlist WHERE user_id = ?", [id]),
       boards: count("SELECT COUNT(*) AS n FROM boards WHERE user_id = ?", [id]),
-      clubs: count("SELECT COUNT(*) AS n FROM club_members WHERE user_id = ?", [id]),
       friends: count(
         "SELECT COUNT(*) AS n FROM friendships WHERE status = 'accepted' AND (requester_id = :id OR addressee_id = :id)",
         { id },
@@ -869,156 +866,13 @@ router.delete("/sagas/:id", sagaParam, (req, res) => {
   res.status(204).end();
 });
 
-// ---- Clubs ---------------------------------------------------------------------
-
-router.get(
-  "/clubs",
-  validate(z.object({ q: z.string().trim().max(100).default("") }), "query"),
-  (req, res) => {
-    const { q } = req.validQuery;
-    const clubs = allNamed(
-      `SELECT clubs.*, users.display_name AS owner_name, users.handle AS owner_handle,
-              (SELECT COUNT(*) FROM club_members WHERE club_members.club_id = clubs.id) AS member_count,
-              (SELECT COUNT(*) FROM club_movies WHERE club_movies.club_id = clubs.id) AS movie_count
-       FROM clubs JOIN users ON users.id = clubs.owner_id
-       ${q ? "WHERE clubs.name LIKE :q ESCAPE '\\' OR users.handle LIKE :q ESCAPE '\\'" : ""}
-       ORDER BY clubs.created_at DESC LIMIT 200`,
-      { q: like(q) },
-    ).map((row) => ({
-      id: row.id,
-      name: row.name,
-      description: row.description,
-      owner: { id: row.owner_id, name: row.owner_name, handle: `@${row.owner_handle}` },
-      memberCount: row.member_count,
-      movieCount: row.movie_count,
-      nowWatching: row.now_watching_movie_id ? getMovieById(row.now_watching_movie_id)?.title ?? null : null,
-      createdAt: row.created_at,
-    }));
-    res.json({ clubs });
-  },
-);
-
-const clubParam = validate(z.object({ id: z.string().min(1).max(64) }), "params");
-const loadClub = (id) => {
-  const club = get("SELECT * FROM clubs WHERE id = ?", [id]);
-  if (!club) throw notFound("No such club");
-  return club;
-};
-
-// A club whole: its name and description, members, and the films on its
-// shared board (who added each).
-router.get("/clubs/:id", clubParam, (req, res) => {
-  const club = loadClub(req.params.id);
-  const members = all(
-    `SELECT users.id, users.display_name, users.handle, users.color, users.avatar_uri, users.suspended_at,
-            club_members.role, club_members.joined_at
-     FROM club_members JOIN users ON users.id = club_members.user_id
-     WHERE club_members.club_id = ? ORDER BY club_members.role = 'owner' DESC, club_members.joined_at`,
-    [club.id],
-  ).map((row) => ({
-    id: row.id,
-    name: row.display_name,
-    handle: `@${row.handle}`,
-    color: row.color,
-    avatarUri: row.avatar_uri,
-    role: row.role,
-    joinedAt: row.joined_at,
-    suspended: row.suspended_at != null,
-  }));
-  const movies = all(
-    `SELECT club_movies.movie_id, club_movies.added_at, users.display_name AS added_by_name, users.handle AS added_by_handle
-     FROM club_movies LEFT JOIN users ON users.id = club_movies.added_by
-     WHERE club_movies.club_id = ? ORDER BY club_movies.added_at DESC, club_movies.rowid DESC`,
-    [club.id],
-  ).map((row) => {
-    const movie = getMovieById(row.movie_id);
-    return {
-      id: row.movie_id,
-      title: movie?.title ?? `Movie ${row.movie_id}`,
-      year: movie?.year ?? null,
-      poster: movie?.poster ?? null,
-      addedAt: row.added_at,
-      addedBy: row.added_by_handle ? { name: row.added_by_name, handle: `@${row.added_by_handle}` } : null,
-    };
-  });
-  res.json({
-    club: {
-      id: club.id,
-      name: club.name,
-      description: club.description,
-      ownerId: club.owner_id,
-      nowWatchingId: club.now_watching_movie_id,
-      createdAt: club.created_at,
-    },
-    members,
-    movies,
-  });
-});
-
-// Rename it or change (or empty) its description.
-router.patch(
-  "/clubs/:id",
-  clubParam,
-  validate(
-    z
-      .object({ name: z.string().trim().min(1).max(CLUB_NAME_MAX), description: z.string().trim().max(CLUB_DESCRIPTION_MAX) })
-      .partial()
-      .refine((body) => Object.keys(body).length > 0, "Nothing to change"),
-  ),
-  (req, res) => {
-    const club = loadClub(req.params.id);
-    const { name, description } = req.body;
-    transaction(() => {
-      if (name !== undefined) run("UPDATE clubs SET name = ? WHERE id = ?", [name, club.id]);
-      if (description !== undefined) run("UPDATE clubs SET description = ? WHERE id = ?", [description, club.id]);
-    });
-    const updated = loadClub(club.id);
-    const edited = [
-      name !== undefined && name !== club.name && `renamed from ${quoted(club.name)}`,
-      description !== undefined && description !== club.description && (description ? "changed its description" : "cleared its description"),
-    ].filter(Boolean);
-    if (edited.length > 0) log(req, "club.update", { type: "club", id: club.id }, `Club ${quoted(updated.name)}: ${edited.join(", ")}`);
-    res.json({ club: { id: updated.id, name: updated.name, description: updated.description } });
-  },
-);
-
-// Takes a film off a club's board (and off "now watching", if it was).
-router.delete(
-  "/clubs/:id/movies/:movieId",
-  validate(z.object({ id: z.string().min(1).max(64), movieId }), "params"),
-  (req, res) => {
-    const club = loadClub(req.params.id);
-    transaction(() => {
-      run("DELETE FROM club_movies WHERE club_id = ? AND movie_id = ?", [club.id, req.params.movieId]);
-      if (club.now_watching_movie_id === req.params.movieId) {
-        run("UPDATE clubs SET now_watching_movie_id = NULL, now_watching_set_at = NULL WHERE id = ?", [club.id]);
-      }
-    });
-    const title = getMovieById(req.params.movieId)?.title ?? `movie ${req.params.movieId}`;
-    log(req, "club.film", { type: "club", id: club.id }, `Took ${quoted(title)} off the club ${quoted(club.name)}'s board`);
-    res.status(204).end();
-  },
-);
-
-const removeClub = (req, id) => {
-  const club = get("SELECT clubs.name, users.handle FROM clubs JOIN users ON users.id = clubs.owner_id WHERE clubs.id = ?", [id]);
-  if (!club) return;
-  run("DELETE FROM clubs WHERE id = ?", [id]);
-  log(req, "club.remove", { type: "club", id }, `Removed @${club.handle}'s club ${quoted(club.name)}`);
-};
-
-router.delete("/clubs/:id", clubParam, (req, res) => {
-  removeClub(req, req.params.id);
-  res.status(204).end();
-});
-
 // ---- Reports -------------------------------------------------------------------
 //
 // What people reported from the app (routes/reports.js), grouped by what
 // was reported — each group a "case": the reported thing as it is now, its
 // owner, and every report about it. An admin closes a case all at once:
 // dismissed (nothing wrong), handled (fixed by hand, e.g. a cleaned-up
-// profile), the list or club removed, or its owner suspended.
+// profile), the list removed, or its owner suspended.
 
 const REASON_LABELS = {
   spam: "spam",
@@ -1048,14 +902,7 @@ const reportedNow = (type, id) => {
       posters: board.movieIds.slice(0, 6).map((movie) => getMovieById(movie)?.poster ?? null),
     };
   }
-  const club = get("SELECT * FROM clubs WHERE id = ?", [id]);
-  return (
-    club && {
-      label: club.name,
-      description: club.description,
-      memberCount: count("SELECT COUNT(*) AS n FROM club_members WHERE club_id = ?", [club.id]),
-    }
-  );
+  return null;
 };
 const describeTarget = (type, label) => (type === "user" ? label : `${type} ${quoted(label)}`);
 const openCaseCount = () =>
@@ -1113,7 +960,7 @@ router.post(
   "/reports/resolve",
   validate(
     z.object({
-      targetType: z.enum(["user", "list", "club"]),
+      targetType: z.enum(["user", "list"]),
       targetId: z.string().min(1).max(64),
       action: z.enum(["dismiss", "handled", "remove", "suspend"]),
       note: z.string().trim().max(300).default(""),
@@ -1129,11 +976,8 @@ router.post(
     let resolution;
     if (action === "remove") {
       if (targetType === "user") throw badRequest("A person can't be removed — clean up their profile, or suspend them");
-      if (now) {
-        if (targetType === "list") removeList(req, targetId);
-        else removeClub(req, targetId);
-      }
-      resolution = targetType === "list" ? "Removed the list" : "Removed the club";
+      if (now) removeList(req, targetId);
+      resolution = "Removed the list";
     } else if (action === "suspend") {
       const reasons = [...new Set(open.map((row) => REASON_LABELS[row.reason]))].join(", ");
       const row = suspendUser(req, open[0].owner_id, `Reported for ${reasons}${note ? ` — ${note}` : ""}`);

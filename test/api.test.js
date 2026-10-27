@@ -1099,96 +1099,6 @@ describe("community", () => {
   });
 });
 
-describe("clubs", () => {
-  test("create, join by code, shared board, now watching, tier list, feed", async () => {
-    const owner = await register("Club Owner", "clubowner");
-    const member = await register("Club Member", "clubmember");
-    const stranger = await register("Club Stranger", "clubstranger");
-
-    let r = await api("POST", "/clubs", {
-      token: owner.token,
-      body: { name: "  Horror Nights ", description: "Scary stuff", movieIds: ["85"] },
-    });
-    assert.equal(r.status, 201);
-    const club = r.body.club;
-    assert.equal(club.name, "Horror Nights");
-    assert.equal(club.role, "owner");
-    assert.match(club.inviteCode, /^[A-HJ-NP-Z2-9]{8}$/);
-    assert.deepEqual(club.movies.map((m) => m.movieId), ["85"]);
-
-    // Strangers can't see it; the code lets you in (case doesn't matter).
-    assert.equal((await api("GET", `/clubs/${club.id}`, { token: stranger.token })).status, 404);
-    assert.equal((await api("POST", "/clubs/join", { token: member.token, body: { code: "NOPE1234" } })).status, 404);
-    r = await api("POST", "/clubs/join", { token: member.token, body: { code: club.inviteCode.toLowerCase() } });
-    assert.equal(r.status, 201);
-    assert.equal(r.body.club.role, "member");
-    assert.equal(r.body.club.memberCount, 2);
-    r = await api("POST", "/clubs/join", { token: member.token, body: { code: club.inviteCode } });
-    assert.equal(r.status, 200, "joining again is harmless");
-
-    // Members add to the board; tiers on club movies show per member.
-    r = await api("POST", `/clubs/${club.id}/movies`, { token: member.token, body: { movieId: "1891" } });
-    assert.deepEqual(r.body.club.movies.map((m) => m.movieId), ["85", "1891"]);
-    await api("POST", "/me/watched", { token: member.token, body: { movieId: "85", tier: "A" } });
-    await api("POST", "/me/watched", { token: member.token, body: { movieId: "424", tier: "F" } }); // not a club movie
-    await api("POST", "/me/watched", { token: owner.token, body: { movieId: "85", tier: "S" } });
-    r = await api("GET", `/clubs/${club.id}`, { token: member.token });
-    const boardEntry = r.body.club.movies.find((m) => m.movieId === "85");
-    assert.deepEqual(
-      boardEntry.watches.map((w) => w.tier).sort(),
-      ["A", "S"],
-    );
-    assert.equal(r.body.club.members[0].role, "owner", "owner listed first");
-
-    // Only the owner sets now watching / renames; a member can't remove the owner's movie.
-    assert.equal((await api("PATCH", `/clubs/${club.id}`, { token: member.token, body: { nowWatching: "1892" } })).status, 403);
-    r = await api("PATCH", `/clubs/${club.id}`, { token: owner.token, body: { nowWatching: "1892", name: "Horror Club" } });
-    assert.equal(r.body.club.nowWatching.movieId, "1892");
-    assert.equal(r.body.club.name, "Horror Club");
-    assert.equal((await api("DELETE", `/clubs/${club.id}/movies/85`, { token: member.token })).status, 403);
-    r = await api("DELETE", `/clubs/${club.id}/movies/1891`, { token: member.token });
-    assert.deepEqual(r.body.club.movies.map((m) => m.movieId), ["85"], "their own one they can");
-
-    // The feed covers club movies (and now watching) only.
-    await api("POST", "/me/watched", { token: member.token, body: { movieId: "1892" } });
-    r = await api("GET", `/clubs/${club.id}/activity`, { token: owner.token });
-    const movies = new Set(r.body.activity.map((event) => event.movieId));
-    assert.ok(movies.has("85") && movies.has("1892"));
-    assert.ok(!movies.has("424"), "nothing outside the club's movies");
-
-    // Your clubs list.
-    r = await api("GET", "/clubs", { token: member.token });
-    assert.deepEqual(r.body.clubs.map((c) => c.name), ["Horror Club"]);
-    assert.equal(r.body.clubs[0].nowWatching, "1892");
-    assert.deepEqual(r.body.clubs[0].movieIds, ["85"]);
-
-    // New invite code: the old one stops working.
-    r = await api("POST", `/clubs/${club.id}/invite`, { token: owner.token });
-    assert.notEqual(r.body.inviteCode, club.inviteCode);
-    assert.equal((await api("POST", "/clubs/join", { token: stranger.token, body: { code: club.inviteCode } })).status, 404);
-
-    // Owner can't leave; members can (twice is fine); owner can remove members.
-    assert.equal((await api("POST", `/clubs/${club.id}/leave`, { token: owner.token })).status, 400);
-    r = await api("POST", "/clubs/join", { token: stranger.token, body: { code: r.body.inviteCode } });
-    r = await api("DELETE", `/clubs/${club.id}/members/${stranger.user.id}`, { token: owner.token });
-    assert.equal(r.body.club.memberCount, 2);
-    assert.equal((await api("POST", `/clubs/${club.id}/leave`, { token: member.token })).status, 204);
-    assert.equal((await api("POST", `/clubs/${club.id}/leave`, { token: member.token })).status, 204);
-    assert.equal((await api("GET", `/clubs/${club.id}`, { token: member.token })).status, 404);
-
-    // Delete: owner only, then gone for everyone; again is fine.
-    assert.equal((await api("DELETE", `/clubs/${club.id}`, { token: owner.token })).status, 204);
-    assert.equal((await api("DELETE", `/clubs/${club.id}`, { token: owner.token })).status, 204);
-    assert.deepEqual((await api("GET", "/clubs", { token: owner.token })).body.clubs, []);
-  });
-
-  test("rejects bad input", async () => {
-    const { token } = await register("Club Bad", "clubbad");
-    assert.equal((await api("POST", "/clubs", { token, body: { name: "" } })).status, 400);
-    assert.equal((await api("POST", "/clubs", { token, body: { name: "x".repeat(41) } })).status, 400);
-    assert.equal((await api("POST", "/clubs", { token, body: { name: "Ok", movieIds: ["999999999"] } })).status, 404);
-  });
-});
 
 describe("TMDB: any movie, search, browse, people", () => {
   let token;
@@ -1269,13 +1179,11 @@ describe("TMDB: any movie, search, browse, people", () => {
     const community = (await api("GET", `/community/movies/${FAKE_MOVIE_ID}`, { token })).body;
     assert.equal(community.tiers.A, 1);
 
-    // Boards and clubs take it too.
+    // Boards take it too.
     const board = await api("POST", "/boards", { token, body: { name: "Found it", movieIds: [FAKE_MOVIE_ID] } });
     assert.equal(board.status, 201);
     const boards = (await api("GET", "/boards", { token })).body;
     assert.ok(boards.movies.some((movie) => movie.id === FAKE_MOVIE_ID));
-    const club = await api("POST", "/clubs", { token, body: { name: "Fakers", movieIds: [FAKE_MOVIE_ID] } });
-    assert.ok(club.body.movies.some((movie) => movie.id === FAKE_MOVIE_ID));
   });
 
   test("similar movies, where to watch, collections", async () => {

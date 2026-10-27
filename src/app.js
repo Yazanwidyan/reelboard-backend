@@ -14,7 +14,6 @@ import adminRoutes from "./routes/admin.js";
 import authRoutes from "./routes/auth.js";
 import boardRoutes from "./routes/boards.js";
 import challengeRoutes from "./routes/challenges.js";
-import clubRoutes from "./routes/clubs.js";
 import collectionRoutes from "./routes/collections.js";
 import communityRoutes from "./routes/community.js";
 import { friendsRouter, usersRouter } from "./routes/friends.js";
@@ -76,7 +75,6 @@ export const createApp = () => {
   app.use("/api/friends", signedIn, friendsRouter);
   app.use("/api/activity", signedIn, activityRoutes);
   app.use("/api/community", signedIn, communityRoutes);
-  app.use("/api/clubs", signedIn, clubRoutes);
   app.use("/api/collections", signedIn, collectionRoutes);
   app.use("/api/people", signedIn, peopleRoutes);
   app.use("/api/movie-nights", signedIn, movieNightRoutes);
