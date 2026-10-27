@@ -164,6 +164,13 @@ const migrate = () => {
     db.exec("ALTER TABLE users ADD COLUMN suspended_at INTEGER");
     db.exec("ALTER TABLE users ADD COLUMN suspended_reason TEXT");
   }
+  // ReelBoard Pro.
+  if (!userColumns.has("pro_since")) {
+    db.exec("ALTER TABLE users ADD COLUMN pro_since INTEGER");
+    db.exec("ALTER TABLE users ADD COLUMN pro_until INTEGER");
+    db.exec("ALTER TABLE users ADD COLUMN pro_source TEXT");
+    db.exec("ALTER TABLE users ADD COLUMN profile_accent TEXT");
+  }
 };
 
 // From data/curation.json: the Taste DNA vocabulary and the clip length.

@@ -396,6 +396,42 @@ describe("admin", () => {
     assert.equal((await api("DELETE", `/admin/users/${reporter.user.id}`, { token: boss.token })).status, 204);
   });
 
+  test("pro: granted and taken by an admin; the accent is Pro's, and friends see both", async () => {
+    const fan = await register("Pro Fan", "profan");
+    const pal = await register("Pro Pal", "propal");
+    await api("POST", "/friends/requests", { token: pal.token, body: { userId: fan.user.id } });
+    await api("POST", `/friends/requests/${pal.user.id}/accept`, { token: fan.token });
+    const me = async () => (await api("GET", "/me/profile", { token: fan.token })).body.profile;
+    const asFriend = async () => (await api("GET", `/users/${fan.user.id}`, { token: pal.token })).body.user;
+
+    assert.equal((await me()).pro.active, false);
+    assert.equal((await api("PATCH", "/me/profile", { token: fan.token, body: { accent: "gold" } })).status, 403, "not Pro yet");
+
+    const granted = await api("POST", `/admin/users/${fan.user.id}/pro`, { token: boss.token, body: { months: 12 } });
+    assert.equal(granted.status, 200, JSON.stringify(granted.body));
+    assert.equal(granted.body.user.pro.active, true);
+    assert.ok(granted.body.user.pro.until > Date.now() + 300 * 24 * 60 * 60 * 1000);
+    assert.equal(granted.body.user.pro.source, "admin");
+    assert.equal((await api("PATCH", "/me/profile", { token: fan.token, body: { accent: "gold" } })).status, 200);
+    assert.equal((await api("PATCH", "/me/profile", { token: fan.token, body: { accent: "neon" } })).status, 400, "only the listed accents");
+    assert.deepEqual([(await asFriend()).pro, (await asFriend()).accent], [true, "gold"]);
+    const listed = await api("GET", "/admin/users?status=pro", { token: boss.token });
+    assert.deepEqual(listed.body.users.map((user) => user.handle), ["@profan"]);
+
+    assert.equal((await api("DELETE", `/admin/users/${fan.user.id}/pro`, { token: boss.token })).status, 200);
+    assert.equal((await me()).pro.active, false);
+    assert.deepEqual([(await asFriend()).pro, (await asFriend()).accent], [false, null], "the accent goes with Pro");
+    // Forever, this time — and the log says so.
+    const forever = await api("POST", `/admin/users/${fan.user.id}/pro`, { token: boss.token, body: {} });
+    assert.equal(forever.body.user.pro.until, null);
+    assert.equal((await asFriend()).accent, "gold", "and comes back with it");
+    const logged = (await api("GET", "/admin/log?action=user", { token: boss.token })).body.entries;
+    assert.equal(logged[0].summary, "Gave @profan Pro with no end");
+    assert.ok(logged.some((entry) => entry.summary === "Took Pro away from @profan"));
+
+    for (const person of [fan, pal]) await api("DELETE", `/admin/users/${person.user.id}`, { token: boss.token });
+  });
+
   test("clubs: list and remove", async () => {
     await api("POST", "/clubs", { token: regular.token, body: { name: "Joe's Club" } });
     const clubs = await api("GET", "/admin/clubs", { token: boss.token });

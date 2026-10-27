@@ -1,4 +1,5 @@
 import { all, fromJSON, get } from "../db/index.js";
+import { accentOf, isPro, proOf } from "./pro.js";
 import { titleName } from "./titles.js";
 
 // Avatar ring colors, the same family the app's mock friends use.
@@ -24,6 +25,9 @@ export const toPublicUser = (row) => ({
   avatarUri: row.avatar_uri,
   coverMovieId: row.cover_movie_id ?? null,
   bio: row.bio,
+  // ReelBoard Pro: a badge, and the accent they chose.
+  pro: isPro(row),
+  accent: accentOf(row),
 });
 
 // How a user sees themself — the app's profileStore, plus account fields.
@@ -44,6 +48,8 @@ export const toProfile = (row) => ({
   title: titleName(row.level),
   topTen: fromJSON(row.top_ten, []),
   pinnedCollections: fromJSON(row.pinned_collections, []),
+  pro: proOf(row),
+  accent: accentOf(row),
   createdAt: row.created_at,
 });
 

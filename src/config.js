@@ -32,6 +32,9 @@ export const config = {
   // Comma-separated list, or "*" for any origin (the default; a native app
   // doesn't send an Origin header anyway, this only matters for web).
   corsOrigin: process.env.CORS_ORIGIN ?? "*",
+  // Where people reach this server from outside — the start of every
+  // share link (routes/shares.js), e.g. https://reelboard.app.
+  publicUrl: process.env.PUBLIC_URL ?? `http://localhost:${process.env.PORT ?? 4000}`,
   // Social sign-in: the client ids a Google / Apple sign-in token must have
   // been issued to. Google's are the OAuth client ids from Google Cloud
   // (the web client id the app passes to Google Sign-In); Apple's is the

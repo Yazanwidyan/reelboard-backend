@@ -26,7 +26,9 @@ import peopleRoutes from "./routes/people.js";
 import pushRoutes from "./routes/push.js";
 import rankRoutes from "./routes/ranks.js";
 import reportRoutes from "./routes/reports.js";
+import shareRoutes from "./routes/shares.js";
 import tasteRoutes from "./routes/taste.js";
+import webRoutes from "./routes/web.js";
 
 // Builds the Express app. The database must already be open (see server.js).
 export const createApp = () => {
@@ -80,6 +82,7 @@ export const createApp = () => {
   app.use("/api/movie-nights", signedIn, movieNightRoutes);
   app.use("/api/ranks", signedIn, rankRoutes);
   app.use("/api/reports", signedIn, reportRoutes);
+  app.use("/api/shares", signedIn, shareRoutes);
 
   // Admins only (ADMIN_EMAILS) — the admin site's API.
   app.use("/api/admin", requireAuth, requireAdmin, adminRoutes);
@@ -90,6 +93,9 @@ export const createApp = () => {
     app.use("/admin", express.static(config.adminDist, { index: false, maxAge: "1h" }));
     app.get(/^\/admin(\/.*)?$/, (req, res) => res.sendFile(path.join(config.adminDist, "index.html")));
   }
+
+  // Shared links' pages: /m/:id, /c/:id, /s/:token (public, no sign-in).
+  app.use(webRoutes);
 
   app.use(notFoundHandler);
   app.use(errorHandler);

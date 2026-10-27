@@ -19,11 +19,14 @@ import {
   DECADE_RANGES,
   ensureMovie,
   generateRecommendations,
+  getMovieById,
   RUNTIME_RANGES,
   toLean,
 } from "../lib/movies.js";
+import { notifyFriendsOfS } from "../lib/push.js";
 import { collectionId, movieId, tier, timestamp } from "../lib/schemas.js";
 import { updateRanks } from "../lib/ranks.js";
+import { friendIdsOf, getUserRow } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/me — the app's movieStore, server-side.
@@ -125,8 +128,17 @@ router.post("/watched", validate(markWatchedSchema), async (req, res) => {
     return completed;
   });
 
+  if (chosenTier === "S") tellFriendsOfS(req.userId, id);
   res.status(201).json({ entry: getWatchedEntry(req.userId, id), completedChallenge });
 });
+
+// An S: friends who saved the film get a push (lib/push).
+const tellFriendsOfS = (userId, id) =>
+  notifyFriendsOfS(userId, id, {
+    friendIds: friendIdsOf(userId),
+    name: getUserRow(userId)?.display_name ?? "A friend",
+    title: getMovieById(id)?.title ?? "a movie",
+  });
 
 const updateWatchedSchema = z
   .object({ tier: tier.nullable(), watchedAt: timestamp })
@@ -139,7 +151,8 @@ router.patch(
   validate(updateWatchedSchema),
   (req, res) => {
     const { movieId: id } = req.params;
-    if (!getWatchedEntry(req.userId, id)) throw notFound("You haven't watched this movie");
+    const before = getWatchedEntry(req.userId, id);
+    if (!before) throw notFound("You haven't watched this movie");
     const { tier: newTier, watchedAt } = req.body;
 
     transaction(() => {
@@ -164,6 +177,7 @@ router.patch(
       // was watched (Marathoner).
       updateRanks(req.userId);
     });
+    if (newTier === "S" && before.tier !== "S") tellFriendsOfS(req.userId, id);
     res.json({ entry: getWatchedEntry(req.userId, id) });
   },
 );

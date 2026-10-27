@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS users (
   -- other people don't see it (search, profiles, friends). NULL = active.
   suspended_at       INTEGER,
   suspended_reason   TEXT,
+  -- ReelBoard Pro (lib/pro.js): from pro_since until pro_until (NULL: no
+  -- end); pro_source 'admin' or 'store'. profile_accent: a Pro perk.
+  pro_since          INTEGER,
+  pro_until          INTEGER,
+  pro_source         TEXT,
+  profile_accent     TEXT,
   created_at         INTEGER NOT NULL
 );
 
@@ -315,3 +321,16 @@ CREATE TABLE IF NOT EXISTS admin_log (
   created_at  INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS admin_log_by_time ON admin_log (created_at DESC);
+
+-- Links to someone's list or profile that they shared (routes/shares.js),
+-- opened in a browser at /s/:token (routes/web.js). One live link per
+-- thing; revoked links stop working.
+CREATE TABLE IF NOT EXISTS share_links (
+  token      TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  type       TEXT NOT NULL CHECK (type IN ('list','profile')),
+  target_id  TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  revoked_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS share_links_by_owner ON share_links (user_id, type, target_id);

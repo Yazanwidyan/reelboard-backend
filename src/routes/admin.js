@@ -12,6 +12,7 @@ import { listBoards, toBoard } from "../lib/library.js";
 import { createSagaResolver, resolveRanks } from "../lib/sagaSources.js";
 import { titleName } from "../lib/titles.js";
 import { IMAGE_BASE, tmdbGet } from "../lib/tmdb.js";
+import { isPro } from "../lib/pro.js";
 import { getUserRow, isSuspended, toProfile } from "../lib/users.js";
 import { isAdmin } from "../middleware/admin.js";
 import { validate } from "../middleware/validate.js";
@@ -135,7 +136,7 @@ router.get(
   validate(
     z.object({
       q: z.string().trim().max(100).default(""),
-      status: z.enum(["all", "suspended"]).default("all"),
+      status: z.enum(["all", "suspended", "pro"]).default("all"),
       page,
       limit: limit(100, 25),
     }),
@@ -146,9 +147,10 @@ router.get(
     const conditions = [
       q && "(email LIKE :q ESCAPE '\\' OR handle LIKE :q ESCAPE '\\' OR display_name LIKE :q ESCAPE '\\')",
       status === "suspended" && "suspended_at IS NOT NULL",
+      status === "pro" && "pro_since IS NOT NULL AND (pro_until IS NULL OR pro_until > :now)",
     ].filter(Boolean);
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const params = { q: like(q) };
+    const params = { q: like(q), now: Date.now() };
     const users = allNamed(
       `SELECT users.*,
               (SELECT COUNT(*) FROM watched WHERE watched.user_id = users.id) AS watched_count,
@@ -169,6 +171,7 @@ router.get(
       watchedCount: row.watched_count,
       lastActive: row.last_active,
       suspendedAt: row.suspended_at ?? null,
+      pro: isPro(row),
     }));
     const total = countNamed(`SELECT COUNT(*) AS n FROM users ${where}`, params);
     res.json({ users, page: pageNumber, total, totalPages: Math.ceil(total / size) });
@@ -255,6 +258,38 @@ router.delete("/users/:id/suspend", userParam, (req, res) => {
   run("UPDATE users SET suspended_at = NULL, suspended_reason = NULL WHERE id = ?", [row.id]);
   log(req, "user.unsuspend", { type: "user", id: row.id }, `Unsuspended @${row.handle}`);
   res.json({ suspension: null });
+});
+
+// ReelBoard Pro, given by hand (until the stores sell it): for `months`, or
+// with no end (null). Granting again sets a new end from now; taking it
+// away ends it at once (the accent they chose waits, in case it's back).
+const MONTH = 30 * DAY;
+router.post(
+  "/users/:id/pro",
+  userParam,
+  validate(z.object({ months: z.number().int().min(1).max(120).nullable().default(null) })),
+  (req, res) => {
+    const row = getUserRow(req.params.id);
+    if (!row) throw notFound("No such user");
+    const now = Date.now();
+    const until = req.body.months ? now + req.body.months * MONTH : null;
+    run("UPDATE users SET pro_since = ?, pro_until = ?, pro_source = 'admin' WHERE id = ?", [
+      isPro(row) ? row.pro_since : now,
+      until,
+      row.id,
+    ]);
+    const length = req.body.months ? `for ${req.body.months} ${req.body.months === 1 ? "month" : "months"}` : "with no end";
+    log(req, "user.pro", { type: "user", id: row.id }, `Gave @${row.handle} Pro ${length}`);
+    res.json({ user: toProfile(getUserRow(row.id)) });
+  },
+);
+
+router.delete("/users/:id/pro", userParam, (req, res) => {
+  const row = getUserRow(req.params.id);
+  if (!row) throw notFound("No such user");
+  run("UPDATE users SET pro_since = NULL, pro_until = NULL, pro_source = NULL WHERE id = ?", [row.id]);
+  log(req, "user.unpro", { type: "user", id: row.id }, `Took Pro away from @${row.handle}`);
+  res.json({ user: toProfile(getUserRow(row.id)) });
 });
 
 // Cleans up a profile: `bio` empties it, `avatar` removes the photo, `cover`

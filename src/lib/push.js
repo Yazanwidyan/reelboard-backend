@@ -39,10 +39,28 @@ const TEXT = {
     en: () => ["Everyone's done swiping", "See the movies you all picked."],
     ar: () => ["انتهى الجميع من السحب", "شاهد الأفلام التي اخترتموها جميعاً."],
   },
+  friendLovedSaved: {
+    en: (name, title) => [`${name} gave ${title} an S`, "It's on your watchlist — maybe tonight?"],
+    ar: (name, title) => [`${name} صنّف ${title} في الفئة S`, "إنه في قائمة مشاهدتك — ربما الليلة؟"],
+  },
 };
 
 const languageOf = (userId) =>
   get("SELECT language FROM user_state WHERE user_id = ?", [userId])?.language === "ar" ? "ar" : "en";
+
+// When someone gives a film an S: the friends who saved it and haven't seen
+// it yet hear about it — the one push about a friend's tiers, since it's
+// the one that helps decide.
+export const notifyFriendsOfS = (userId, movieId, { friendIds, name, title }) => {
+  if (friendIds.length === 0) return;
+  const savers = all(
+    `SELECT watchlist.user_id FROM watchlist
+     WHERE watchlist.movie_id = ? AND watchlist.user_id IN (${friendIds.map(() => "?").join(", ")})
+       AND NOT EXISTS (SELECT 1 FROM watched WHERE watched.user_id = watchlist.user_id AND watched.movie_id = ?)`,
+    [movieId, ...friendIds, movieId],
+  ).map((row) => row.user_id);
+  notify(savers, "friendLovedSaved", [name, title], `reelboard://movie/${movieId}`);
+};
 
 // `kind`: a key of TEXT. `args`: passed to its text. `url`: opened on tap
 // (a reelboard:// link the app knows).

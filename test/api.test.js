@@ -820,6 +820,38 @@ describe("push notifications", () => {
     assert.equal(sent[0].title, "Everyone's done swiping");
   });
 
+  test("an S tells the friends who saved it (and haven't seen it) — nobody else", async () => {
+    const critic = await register("Push Critic", "pushcritic");
+    const saver = await register("Push Saver", "pushsaver");
+    const seen = await register("Push Seen", "pushseen");
+    const stranger = await register("Push Stranger", "pushstranger");
+    for (const friend of [saver, seen]) {
+      await api("POST", "/friends/requests", { token: critic.token, body: { userId: friend.user.id } });
+      await api("POST", `/friends/requests/${critic.user.id}/accept`, { token: friend.token });
+    }
+    for (const person of [saver, seen, stranger]) {
+      await api("POST", "/me/push-tokens", { token: person.token, body: { token: `ExponentPushToken[${person.user.id}]` } });
+      await api("POST", "/me/watchlist", { token: person.token, body: { movieId: "155" } });
+    }
+    await api("POST", "/me/watched", { token: seen.token, body: { movieId: "155" } });
+
+    sent.length = 0;
+    await api("POST", "/me/watched", { token: critic.token, body: { movieId: "155", tier: "A" } });
+    await settle();
+    assert.equal(sent.length, 0, "an A says nothing");
+
+    await api("PATCH", "/me/watched/155", { token: critic.token, body: { tier: "S" } });
+    await settle();
+    assert.deepEqual(sent.map((m) => m.to), [`ExponentPushToken[${saver.user.id}]`]);
+    assert.equal(sent[0].title, "Push Critic gave The Dark Knight an S");
+    assert.equal(sent[0].data.url, "reelboard://movie/155");
+
+    sent.length = 0;
+    await api("PATCH", "/me/watched/155", { token: critic.token, body: { tier: "S" } });
+    await settle();
+    assert.equal(sent.length, 0, "already S: not again");
+  });
+
   test("a token Expo says is gone is forgotten; tokens can be removed", async () => {
     const user = await register("Push Gone", "pushgone");
     const other = await register("Push Other", "pushother");
@@ -1320,5 +1352,53 @@ describe("TMDB: any movie, search, browse, people", () => {
     } finally {
       process.env.TMDB_API_URL = url;
     }
+  });
+});
+
+describe("share links and their web pages", () => {
+  const page = async (path_) => {
+    const response = await fetch(base.replace(/\/api$/, "") + path_);
+    return { status: response.status, html: await response.text(), cache: response.headers.get("cache-control") };
+  };
+
+  test("a movie and a collection: a public link, a page with a card for chats", async () => {
+    const owner = await register("Web Sharer", "websharer");
+    const movie = await api("POST", "/shares", { token: owner.token, body: { type: "movie", id: "155" } });
+    assert.equal(movie.status, 200, JSON.stringify(movie.body));
+    assert.match(movie.body.url, /\/m\/155$/);
+    const moviePage = await page("/m/155");
+    assert.equal(moviePage.status, 200);
+    assert.match(moviePage.html, /<meta property="og:title" content="The Dark Knight \(2008\)"/);
+    assert.match(moviePage.html, /href="reelboard:\/\/movie\/155"/);
+    assert.equal((await page("/m/99999999")).status, 404);
+    assert.equal((await api("POST", "/shares", { token: owner.token, body: { type: "movie", id: "99999999" } })).status, 404);
+  });
+
+  test("a list or a profile: only through its owner's link, until it's taken back", async () => {
+    const owner = await register("List Owner <b>", "listowner");
+    const other = await register("Not Owner", "notowner");
+    const list = (await api("POST", "/boards", { token: owner.token, body: { name: "Rainy <Sunday>", movieIds: ["155"] } })).body.board;
+
+    assert.equal((await api("POST", "/shares", { token: other.token, body: { type: "list", id: list.id } })).status, 404, "not yours");
+    const shared = await api("POST", "/shares", { token: owner.token, body: { type: "list", id: list.id } });
+    assert.match(shared.body.url, /\/s\/[A-Za-z0-9_-]+$/);
+    const again = await api("POST", "/shares", { token: owner.token, body: { type: "list", id: list.id } });
+    assert.equal(again.body.url, shared.body.url, "the same link each time");
+
+    const listPage = await page(new URL(shared.body.url).pathname);
+    assert.equal(listPage.status, 200);
+    assert.match(listPage.html, /Rainy &lt;Sunday&gt;/, "escaped");
+    assert.doesNotMatch(listPage.html, /<b>/);
+    assert.match(listPage.html, /href="\/m\/155"/);
+    assert.match(listPage.html, /noindex/);
+    assert.match(listPage.cache, /private/);
+
+    const profile = await api("POST", "/shares", { token: owner.token, body: { type: "profile" } });
+    const profilePage = await page(new URL(profile.body.url).pathname);
+    assert.match(profilePage.html, /@listowner/);
+
+    assert.equal((await api("DELETE", `/shares/${shared.body.token}`, { token: owner.token })).status, 204);
+    assert.equal((await page(new URL(shared.body.url).pathname)).status, 404, "taken back");
+    assert.equal((await page("/s/nonsense-token")).status, 404);
   });
 });

@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
 import { fromJSON, get, run, toJSON, transaction } from "../db/index.js";
-import { badRequest, conflict, unauthorized } from "../lib/errors.js";
+import { badRequest, conflict, forbidden, unauthorized } from "../lib/errors.js";
 import { newId } from "../lib/ids.js";
 import { getFullState, getUserState, toSettings } from "../lib/library.js";
 import { ensureMovies, getMovieById } from "../lib/movies.js";
@@ -24,6 +24,7 @@ import {
   S_TIER_ORDER_MAX,
   uniqueIds,
 } from "../lib/schemas.js";
+import { isPro, PRO_ACCENTS } from "../lib/pro.js";
 import { getUserRow, toProfile } from "../lib/users.js";
 import { updateRanks } from "../lib/ranks.js";
 import { validate } from "../middleware/validate.js";
@@ -51,6 +52,8 @@ const profileSchema = z
     // A film's still as the profile's cover; null takes it off.
     coverMovieId: movieId.nullable(),
     handle,
+    // A Pro perk: the profile's accent colour (null: none).
+    accent: z.enum(PRO_ACCENTS).nullable(),
     // Ranks and level aren't accepted: the server works them out from the
     // watch history (lib/ranks.js). Older apps still send XP and a level;
     // they're dropped like any other unknown field.
@@ -63,10 +66,14 @@ const PROFILE_COLUMNS = {
   avatarUri: "avatar_uri",
   coverMovieId: "cover_movie_id",
   handle: "handle",
+  accent: "profile_accent",
 };
 
 router.patch("/profile", validate(profileSchema), (req, res) => {
   const updates = Object.entries(req.body).filter(([, value]) => value !== undefined);
+  if (req.body.accent && !isPro(getUserRow(req.userId))) {
+    throw forbidden("Profile accents come with ReelBoard Pro");
+  }
   if (req.body.handle) {
     const owner = get("SELECT id FROM users WHERE handle = ?", [req.body.handle]);
     if (owner && owner.id !== req.userId) throw conflict(`@${req.body.handle} is taken`);
