@@ -3,9 +3,10 @@
 -- JSON columns hold arrays/objects serialized as text.
 
 -- Every movie the server knows, by TMDB id ("603" is The Matrix). The
--- pool (in_pool = 1) is data/catalog.json, loaded on every start: the
--- curated movies with hand-tuned or estimated vibes that Swipe, Spin,
--- recommendations and collections draw from. Any other TMDB movie is added
+-- pool (in_pool = 1) is built by `npm run build-pool` from
+-- data/curation.json, the seeds and TMDB: the curated movies with
+-- hand-tuned or estimated vibes that Swipe, recommendations and
+-- collections draw from. Any other TMDB movie is added
 -- the first time someone opens or saves it, and refreshed when it's older
 -- than a week (lib/movies.js).
 CREATE TABLE IF NOT EXISTS movies (
