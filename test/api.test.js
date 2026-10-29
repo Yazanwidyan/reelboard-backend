@@ -593,6 +593,13 @@ describe("library", () => {
     assert.equal(taste.body.passes[0].movieId, "284");
     assert.equal((await api("PUT", "/me/taste/leanings", { token, body: { leanings: [2] } })).status, 400);
   });
+
+  test("taste: a pass can be taken back", async () => {
+    await api("POST", "/me/taste/passes", { token, body: { movieId: "157336" } });
+    assert.equal((await api("DELETE", "/me/taste/passes/157336", { token })).status, 204);
+    const taste = await api("GET", "/me/taste", { token });
+    assert.ok(!taste.body.passes.some((pass) => pass.movieId === "157336"));
+  });
 });
 
 describe("ranks and title", () => {

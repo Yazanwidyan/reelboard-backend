@@ -64,6 +64,12 @@ router.post("/passes", validate(z.object({ movieId })), async (req, res) => {
   res.status(201).json({ movieId: req.body.movieId, at });
 });
 
+// Take a pass back (Undo on "Not for me").
+router.delete("/passes/:movieId", validate(z.object({ movieId }), "params"), (req, res) => {
+  run("DELETE FROM taste_passes WHERE user_id = ? AND movie_id = ?", [req.userId, req.params.movieId]);
+  res.status(204).end();
+});
+
 router.delete("/", (req, res) => {
   transaction(() => {
     run("DELETE FROM taste_aspects WHERE user_id = ?", [req.userId]);
