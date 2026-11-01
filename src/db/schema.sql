@@ -184,6 +184,17 @@ CREATE TABLE IF NOT EXISTS friendships (
 );
 CREATE INDEX IF NOT EXISTS friendships_by_addressee ON friendships (addressee_id);
 
+-- Someone you blocked: no friendship or request either way, and neither of
+-- you finds the other in search or by profile.
+CREATE TABLE IF NOT EXISTS blocks (
+  blocker_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  blocked_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (blocker_id, blocked_id),
+  CHECK (blocker_id <> blocked_id)
+);
+CREATE INDEX IF NOT EXISTS blocks_by_blocked ON blocks (blocked_id);
+
 -- The friends feed. type: watched | tier | watchlist | badge | set
 CREATE TABLE IF NOT EXISTS activity (
   id         TEXT PRIMARY KEY,
@@ -303,3 +314,15 @@ CREATE TABLE IF NOT EXISTS share_links (
   revoked_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS share_links_by_owner ON share_links (user_id, type, target_id);
+
+-- What the app reports for the launch numbers on the admin dashboard
+-- (routes/events.js): onboarding finished, Taste DNA shared, the app opened.
+-- One row per person, event and day; nothing else about what they did.
+CREATE TABLE IF NOT EXISTS events (
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name       TEXT NOT NULL,
+  day        INTEGER NOT NULL,          -- days since 1970 (UTC)
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, name, day)
+);
+CREATE INDEX IF NOT EXISTS events_by_name ON events (name, created_at);

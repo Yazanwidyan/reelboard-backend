@@ -15,6 +15,7 @@ import {
   toPick,
 } from "../lib/library.js";
 import { DEFAULT_COUNT, pickCandidates } from "../lib/candidates.js";
+import { matchFilms, starsToTier } from "../lib/letterboxd.js";
 import {
   DECADE_RANGES,
   ensureMovie,
@@ -27,6 +28,7 @@ import { notifyFriendsOfS } from "../lib/push.js";
 import { collectionId, movieId, tier, timestamp } from "../lib/schemas.js";
 import { updateRanks } from "../lib/ranks.js";
 import { friendIdsOf, getUserRow } from "../lib/users.js";
+import { rateLimit } from "../middleware/rateLimit.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/me — the app's movieStore, server-side.
@@ -340,6 +342,74 @@ router.get(
       count,
     });
     res.json({ movies: movies.map(toLean), filters, matching, relaxed, generatedAt: Date.now() });
+  },
+);
+
+// ---- Letterboxd import ---------------------------------------------------
+
+// POST /api/me/import/letterboxd — rows from a Letterboxd export, which the
+// app sends a couple of hundred at a time. Added to what's there, never
+// replacing it: a film already watched keeps its date and gains a tier only
+// if it had none. Quiet — nothing in the friends feed, no pushes.
+const letterboxdRow = z.object({
+  title: z.string().trim().min(1).max(300),
+  year: z.number().int().min(1870).max(2100).nullable().optional(),
+});
+const letterboxdSchema = z.object({
+  watched: z
+    .array(
+      letterboxdRow.extend({
+        stars: z.number().min(0.5).max(5).nullable().optional(),
+        watchedAt: timestamp.nullable().optional(),
+      }),
+    )
+    .max(250)
+    .default([]),
+  watchlist: z.array(letterboxdRow.extend({ addedAt: timestamp.nullable().optional() })).max(250).default([]),
+});
+
+router.post(
+  "/import/letterboxd",
+  rateLimit({ windowMs: 60 * 1000, max: 30 }),
+  validate(letterboxdSchema),
+  async (req, res) => {
+    const { watched, watchlist } = req.body;
+    const watchedIds = await matchFilms(watched);
+    const watchlistIds = await matchFilms(watchlist);
+    const now = Date.now();
+    const unmatched = [...watched.filter((_, i) => !watchedIds[i]), ...watchlist.filter((_, i) => !watchlistIds[i])].map(
+      ({ title, year }) => ({ title, year: year ?? null }),
+    );
+
+    let addedWatched = 0;
+    let addedWatchlist = 0;
+    transaction(() => {
+      watched.forEach((row, i) => {
+        const id = watchedIds[i];
+        if (!id) return;
+        const { changes } = run(
+          `INSERT INTO watched (user_id, movie_id, watched_at, tier, watch_count)
+           VALUES (?, ?, ?, ?, 1)
+           ON CONFLICT (user_id, movie_id) DO UPDATE SET tier = coalesce(watched.tier, excluded.tier)
+           WHERE watched.tier IS NULL AND excluded.tier IS NOT NULL`,
+          [req.userId, id, Math.min(row.watchedAt ?? now, now), starsToTier(row.stars)],
+        );
+        addedWatched += changes;
+        run("DELETE FROM watchlist WHERE user_id = ? AND movie_id = ?", [req.userId, id]);
+      });
+      watchlist.forEach((row, i) => {
+        const id = watchlistIds[i];
+        if (!id || getWatchedEntry(req.userId, id)) return;
+        addedWatchlist += run("INSERT OR IGNORE INTO watchlist (user_id, movie_id, added_at) VALUES (?, ?, ?)", [
+          req.userId,
+          id,
+          Math.min(row.addedAt ?? now, now),
+        ]).changes;
+      });
+      updateRanks(req.userId);
+    });
+
+    res.json({ watched: addedWatched, watchlist: addedWatchlist, unmatched });
   },
 );
 

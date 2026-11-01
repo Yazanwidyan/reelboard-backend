@@ -92,7 +92,38 @@ router.get("/stats", (req, res) => {
     };
   });
 
+  // The launch numbers, for people who signed up in the last 30 days (the
+  // app reports the events — routes/events.js). Day-7 return: of those
+  // who joined 7–37 days ago, how many opened the app a week or more later.
+  const rate = (part, whole) => ({ part, whole, rate: whole ? Math.round((part / whole) * 1000) / 1000 : null });
+  const did = (name) =>
+    `EXISTS (SELECT 1 FROM events WHERE events.user_id = users.id AND events.name = '${name}')`;
+  const recent = count("SELECT COUNT(*) AS n FROM users WHERE created_at > ?", [since(30)]);
+  const onboarded = count(`SELECT COUNT(*) AS n FROM users WHERE created_at > ? AND ${did("onboarding_completed")}`, [
+    since(30),
+  ]);
+  const shared = count(
+    `SELECT COUNT(*) AS n FROM users
+     WHERE created_at > ? AND ${did("onboarding_completed")} AND ${did("dna_shared")}`,
+    [since(30)],
+  );
+  const weekOld = count("SELECT COUNT(*) AS n FROM users WHERE created_at > ? AND created_at <= ?", [
+    since(37),
+    since(7),
+  ]);
+  const returned = count(
+    `SELECT COUNT(*) AS n FROM users WHERE created_at > ? AND created_at <= ?
+       AND EXISTS (SELECT 1 FROM events WHERE events.user_id = users.id AND events.name = 'app_open'
+                   AND events.created_at >= users.created_at + ?)`,
+    [since(37), since(7), 7 * DAY],
+  );
+
   res.json({
+    launch: {
+      onboardingCompleted: rate(onboarded, recent),
+      dnaShared: rate(shared, onboarded),
+      day7Return: rate(returned, weekOld),
+    },
     users: {
       total: count("SELECT COUNT(*) AS n FROM users"),
       new7: count("SELECT COUNT(*) AS n FROM users WHERE created_at > ?", [since(7)]),

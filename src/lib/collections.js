@@ -24,6 +24,14 @@ const MIN_FRANCHISE_SIZE = 3;
 const MIN_COLLECTION_SIZE = 2;
 const MIN_ACTOR_COLLECTION_SIZE = 3;
 const CURATED_SIZE = 15;
+// A director's films in the pool count as a collection of their own once
+// there are this many — so tastes the sagas don't cover still have
+// something to finish…
+const MIN_DIRECTOR_PATH = 3;
+// …and past this many, it's their best-known films that count.
+const ESSENTIALS = 8;
+const PATHS = 10;
+const NEXT_PER_PATH = 3;
 export const SAGA = "saga";
 
 export const slugify = (value) =>
@@ -87,6 +95,22 @@ const build = (movies, sagas) => {
   });
   const all = [...byId.values()];
   const sagaList = all.filter((collection) => collection.type === SAGA);
+  // A big filmography can't be finished; its best-known few can. These
+  // open like any collection (byId) but aren't listed with a movie's own.
+  const movieById = new Map(movies.map((movie) => [movie.id, movie]));
+  const essentials = director
+    .filter((collection) => collection.movieIds.length > ESSENTIALS)
+    .map((collection) => ({
+      ...collection,
+      id: `director-essentials-${slugify(collection.title)}`,
+      movieIds: collection.movieIds
+        .map((id) => movieById.get(id))
+        .sort((a, b) => a.rank - b.rank)
+        .slice(0, ESSENTIALS)
+        .sort(byYear)
+        .map((movie) => movie.id),
+    }));
+  essentials.forEach((collection) => byId.set(collection.id, collection));
   const byMovie = new Map();
   all.forEach((collection) =>
     collection.movieIds.forEach((id) => {
@@ -94,7 +118,7 @@ const build = (movies, sagas) => {
       byMovie.get(id).push(collection);
     }),
   );
-  return { all, byId, byMovie, sagas: sagaList };
+  return { all, byId, byMovie, sagas: sagaList, essentials };
 };
 
 // The pool and the sagas don't change while the server runs, so they're
@@ -176,6 +200,62 @@ export const getPersonalCollections = (watchedIds, unlockedIds = []) => {
     .filter((saga) => saga.movieIds.some((id) => watched.has(id)))
     .forEach((saga) => found.set(saga.id, saga));
   return [...found.values()];
+};
+
+// ---- Collections in progress -------------------------------------------------
+
+// Every collection you're part-way through — the sagas, and directors'
+// films in the pool (their best-known 8 when there are more; a director
+// with a saga of their own has just the saga) — closest to finished first:
+//   [{ id, type, kind, title, person, art, movieIds, watched, total,
+//      next: [movie ids, best first] }]
+// `next`: the films you haven't seen, the pool's best-ranked first. Home
+// shows these as "Finish what you started", and Tonight says "2 left in…".
+export const getCollectionPaths = (watchedIds) => {
+  const watched = new Set(watchedIds);
+  const sagaPeople = new Set(getSagas().map((saga) => saga.person).filter(Boolean));
+  const { all, essentials } = collections();
+  const directors = [
+    ...all.filter(
+      (collection) =>
+        collection.type === "director" &&
+        collection.movieIds.length >= MIN_DIRECTOR_PATH &&
+        collection.movieIds.length <= ESSENTIALS,
+    ),
+    ...essentials,
+  ].filter((collection) => !sagaPeople.has(collection.title));
+  const rankOf = (id) => getMovieById(id)?.rank ?? Number.MAX_SAFE_INTEGER;
+  // Closest to done first; then sagas, then the bigger and better-known.
+  return [...getSagas(), ...directors]
+    .map((collection) => {
+      const seen = collection.movieIds.filter((id) => watched.has(id)).length;
+      const best = Math.min(...collection.movieIds.map(rankOf));
+      return { collection, seen, total: collection.movieIds.length, best };
+    })
+    .filter(({ seen, total }) => seen > 0 && seen < total)
+    .sort(
+      (a, b) =>
+        a.total - a.seen - (b.total - b.seen) ||
+        (b.collection.type === SAGA) - (a.collection.type === SAGA) ||
+        b.seen - a.seen ||
+        a.best - b.best,
+    )
+    .slice(0, PATHS)
+    .map(({ collection, seen, total }) => ({
+      id: collection.id,
+      type: collection.type,
+      kind: collection.kind ?? (collection.type === "director" ? "director" : null),
+      title: collection.title,
+      person: collection.person ?? (collection.type === "director" ? collection.title : null),
+      art: collection.art ?? null,
+      movieIds: collection.movieIds,
+      watched: seen,
+      total,
+      next: collection.movieIds
+        .filter((id) => !watched.has(id))
+        .sort((a, b) => rankOf(a) - rankOf(b))
+        .slice(0, NEXT_PER_PATH),
+    }));
 };
 
 // To browse and to suggest from: every saga, in the curation's order.

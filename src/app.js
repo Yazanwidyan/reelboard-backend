@@ -16,6 +16,7 @@ import boardRoutes from "./routes/boards.js";
 import challengeRoutes from "./routes/challenges.js";
 import collectionRoutes from "./routes/collections.js";
 import communityRoutes from "./routes/community.js";
+import eventRoutes from "./routes/events.js";
 import { friendsRouter, usersRouter } from "./routes/friends.js";
 import libraryRoutes from "./routes/library.js";
 import meRoutes from "./routes/me.js";
@@ -81,6 +82,7 @@ export const createApp = () => {
   app.use("/api/ranks", signedIn, rankRoutes);
   app.use("/api/reports", signedIn, reportRoutes);
   app.use("/api/shares", signedIn, shareRoutes);
+  app.use("/api/events", signedIn, eventRoutes);
 
   // Admins only (ADMIN_EMAILS) — the admin site's API.
   app.use("/api/admin", requireAuth, requireAdmin, adminRoutes);

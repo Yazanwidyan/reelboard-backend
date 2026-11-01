@@ -1,5 +1,5 @@
 import { all, fromJSON, get, run } from "../db/index.js";
-import { attachCollections, getPersonalCollections } from "./collections.js";
+import { attachCollections, getCollectionPaths, getPersonalCollections } from "./collections.js";
 import { moviesFor } from "./movies.js";
 import { toProfile, getUserRow } from "./users.js";
 
@@ -115,16 +115,23 @@ export const getTaste = (userId) => ({
 });
 
 // The library part of the state (GET /api/me/library).
-export const getLibrary = (userId, state = getUserState(userId)) => ({
-  bucketList: listWatchlist(userId),
-  watched: listWatched(userId),
-  ...toPick(state),
-  unlockedCollections: fromJSON(state.unlocked_collections, []),
-});
+// `paths`: the collections you're part-way through, closest to finished
+// first, each with the films to watch next (lib/collections.js).
+export const getLibrary = (userId, state = getUserState(userId)) => {
+  const watched = listWatched(userId);
+  return {
+    bucketList: listWatchlist(userId),
+    watched,
+    ...toPick(state),
+    unlockedCollections: fromJSON(state.unlocked_collections, []),
+    paths: getCollectionPaths(watched.map((entry) => entry.movieId)),
+  };
+};
 
 export const libraryMovieIds = (library) => [
   ...library.bucketList.map((entry) => entry.movieId),
   ...library.watched.map((entry) => entry.movieId),
+  ...(library.paths ?? []).flatMap((path) => path.next),
   library.pickedMovie,
 ];
 

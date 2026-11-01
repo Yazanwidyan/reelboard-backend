@@ -363,6 +363,32 @@ describe("collections", () => {
     assert.equal(me.body.bucketList, undefined);
   });
 
+  test("paths: the collections you're part-way through, closest to done first, with what's next", async () => {
+    const { token: own } = await register("Path Finder", "pathfinder");
+    await api("POST", "/me/watched", { token: own, body: { movieId: NOLAN.darkKnight } });
+    await api("POST", "/me/watched", { token: own, body: { movieId: NOLAN.inception } });
+    const { body } = await api("GET", "/me/library", { token: own });
+
+    const [first, ...rest] = body.paths;
+    assert.equal(first.id, "saga-gothams-guardian", "2 left beats 3 left");
+    assert.equal(first.watched, 1);
+    assert.equal(first.total, 3);
+    assert.equal(first.next.length, 2);
+    assert.ok(!first.next.includes(NOLAN.darkKnight), "only films you haven't seen");
+    const nolan = rest.find((path) => path.id === "saga-mind-bender");
+    assert.deepEqual([nolan.watched, nolan.total], [2, 5]);
+    // Every path's next films come with the library, for their posters.
+    const have = new Set(body.movies.map((movie) => movie.id));
+    assert.ok(body.paths.every((path) => path.next.every((id) => have.has(id))));
+
+    // A finished one isn't "in progress" any more.
+    await api("POST", "/me/watched", { token: own, body: { movieId: "272" } });
+    await api("POST", "/me/watched", { token: own, body: { movieId: "49026" } });
+    const after = (await api("GET", "/me/library", { token: own })).body.paths;
+    assert.ok(!after.some((path) => path.id === "saga-gothams-guardian"));
+    assert.ok((await api("GET", "/me", { token: own })).body.library.paths.length > 0);
+  });
+
   test("featured: every saga; lists still open for browsing; a movie's own", async () => {
     const featured = await api("GET", "/collections", { token });
     assert.equal(featured.status, 200);
@@ -1015,6 +1041,33 @@ describe("friends and activity", () => {
     const r = await api("POST", "/friends/requests", { token: b.token, body: { userId: a.user.id } });
     assert.equal(r.body.relationship, "friends");
   });
+
+  test("blocking ends the friendship and hides both people from each other", async () => {
+    const a = await register("Lina Haddad", "linah");
+    const b = await register("Karim Saleh", "karims");
+    await api("POST", "/friends/requests", { token: a.token, body: { userId: b.user.id } });
+    await api("POST", `/friends/requests/${a.user.id}/accept`, { token: b.token });
+
+    const blocked = await api("POST", "/friends/blocked", { token: a.token, body: { userId: b.user.id } });
+    assert.equal(blocked.status, 201);
+    assert.equal((await api("GET", "/friends", { token: a.token })).body.friends.length, 0);
+    assert.equal((await api("GET", "/friends", { token: b.token })).body.friends.length, 0);
+    assert.deepEqual(
+      (await api("GET", "/friends/blocked", { token: a.token })).body.users.map((u) => u.id),
+      [b.user.id],
+    );
+
+    // Neither finds, opens or asks the other.
+    assert.equal((await api("GET", "/users/search?q=karims", { token: a.token })).body.users.length, 0);
+    assert.equal((await api("GET", "/users/search?q=linah", { token: b.token })).body.users.length, 0);
+    assert.equal((await api("GET", `/users/${a.user.id}`, { token: b.token })).status, 404);
+    const ask = await api("POST", "/friends/requests", { token: b.token, body: { userId: a.user.id } });
+    assert.equal(ask.status, 404);
+
+    assert.equal((await api("DELETE", `/friends/blocked/${b.user.id}`, { token: a.token })).status, 204);
+    assert.equal((await api("GET", `/users/${a.user.id}`, { token: b.token })).status, 200);
+    assert.equal((await api("DELETE", `/friends/blocked/${b.user.id}`, { token: a.token })).status, 404);
+  });
 });
 
 describe("import and account deletion", () => {
@@ -1238,6 +1291,36 @@ describe("TMDB: any movie, search, browse, people", () => {
     const scores = similar.map((item) => item.score);
     assert.deepEqual(scores, [...scores].sort((x, y) => y - x), "best first");
     assert.equal((await api("GET", "/movies/272/like")).status, 401);
+  });
+
+  test("a Letterboxd export is matched by title and year, and added to the library", async () => {
+    const { token: own } = await register("Boxd Fan", "boxdfan");
+    const [first, second] = ["289", "15"].map((id) => POOL.find((movie) => movie.id === id));
+    await api("POST", "/me/watched", { token: own, body: { movieId: first.id } });
+
+    const r = await api("POST", "/me/import/letterboxd", {
+      token: own,
+      body: {
+        watched: [
+          { title: first.title.toUpperCase(), year: first.year, stars: 5 },
+          { title: "The Fake Film", year: 2021, stars: 3.5, watchedAt: 1600000000000 },
+          { title: "Nothing Like It", year: 1999 },
+        ],
+        watchlist: [{ title: second.title, year: second.year }, { title: "The Fake Film", year: 2021 }],
+      },
+    });
+    assert.equal(r.status, 200, JSON.stringify(r.body));
+    assert.equal(r.body.watched, 2, "a new film, and a tier for one that had none");
+    assert.equal(r.body.watchlist, 1, "a film already watched isn't saved for later");
+    assert.deepEqual(r.body.unmatched, [{ title: "Nothing Like It", year: 1999 }]);
+
+    const watched = (await api("GET", "/me/watched", { token: own })).body.watched;
+    assert.equal(watched.find((entry) => entry.movieId === first.id).tier, "S");
+    const fake = watched.find((entry) => entry.movieId === FAKE_MOVIE_ID);
+    assert.equal(fake.tier, "B");
+    assert.equal(fake.timestamp, 1600000000000);
+    const saved = (await api("GET", "/me/watchlist", { token: own })).body.watchlist;
+    assert.deepEqual(saved.map((entry) => entry.movieId), [second.id]);
   });
 
   test("people: search, and a filmography split by role", async () => {

@@ -1,13 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
-import { all, fromJSON, get, run } from "../db/index.js";
+import { all, fromJSON, get, run, transaction } from "../db/index.js";
 import { badRequest, conflict, notFound } from "../lib/errors.js";
 import { attachCollections, getFinishedCollections } from "../lib/collections.js";
 import { listBoards } from "../lib/library.js";
 import { moviesFor } from "../lib/movies.js";
 import { notify } from "../lib/push.js";
 import { handle } from "../lib/schemas.js";
-import { areFriends, friendIdsOf, getUserRow, isSuspended, toPublicUser } from "../lib/users.js";
+import { areFriends, friendIdsOf, getUserRow, isBlocked, isSuspended, toPublicUser } from "../lib/users.js";
 import { validate } from "../middleware/validate.js";
 
 // Notifications about friend requests open the Friends screen.
@@ -58,10 +58,11 @@ const friendMovies = (friends) =>
 
 const userParam = z.object({ userId: z.string().min(1) });
 
-// Suspended accounts are as good as gone to everyone else.
-const loadUser = (userId) => {
+// Suspended accounts are as good as gone to everyone else, and so is
+// anyone blocked, either way.
+const loadUser = (me, userId) => {
   const row = getUserRow(userId);
-  if (!row || isSuspended(row)) throw notFound("No such user");
+  if (!row || isSuspended(row) || isBlocked(me, row.id)) throw notFound("No such user");
   return row;
 };
 
@@ -76,6 +77,10 @@ usersRouter.get(
     const users = all(
       `SELECT * FROM users
        WHERE id <> :me AND suspended_at IS NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM blocks
+           WHERE (blocker_id = :me AND blocked_id = users.id) OR (blocker_id = users.id AND blocked_id = :me)
+         )
          AND (handle LIKE :prefix ESCAPE '\\' OR display_name LIKE :anywhere ESCAPE '\\')
        ORDER BY (handle LIKE :prefix ESCAPE '\\') DESC, display_name
        LIMIT 20`,
@@ -89,7 +94,7 @@ usersRouter.get(
 // and their trophies: `finishedCollections` (ids — the definitions come in
 // `collections`) and the ones they pinned to the front.
 usersRouter.get("/:userId", validate(userParam, "params"), (req, res) => {
-  const row = loadUser(req.params.userId);
+  const row = loadUser(req.userId, req.params.userId);
   const rel = relationship(req.userId, row.id);
   if (rel !== "friends" && rel !== "self") {
     return res.json({ user: { ...toPublicUser(row), relationship: rel }, movies: [] });
@@ -109,7 +114,7 @@ usersRouter.get("/:userId", validate(userParam, "params"), (req, res) => {
 });
 
 usersRouter.get("/:userId/boards", validate(userParam, "params"), (req, res) => {
-  const row = loadUser(req.params.userId);
+  const row = loadUser(req.userId, req.params.userId);
   if (row.id !== req.userId && !areFriends(req.userId, row.id)) {
     throw notFound("No such user");
   }
@@ -156,6 +161,7 @@ friendsRouter.post(
       : get("SELECT * FROM users WHERE handle = ?", [req.body.handle]);
     if (!target || isSuspended(target)) throw notFound("No such user");
     if (target.id === req.userId) throw badRequest("You can't friend yourself");
+    if (isBlocked(req.userId, target.id)) throw notFound("No such user");
 
     const existing = getFriendship(req.userId, target.id);
     if (existing?.status === "accepted") throw conflict("You're already friends");
@@ -179,6 +185,46 @@ friendsRouter.post(
     res.status(201).json({ relationship: "outgoing", user: toPublicUser(target) });
   },
 );
+
+// The people you blocked, newest first.
+friendsRouter.get("/blocked", (req, res) => {
+  const users = all(
+    `SELECT users.* FROM blocks JOIN users ON users.id = blocks.blocked_id
+     WHERE blocks.blocker_id = ? ORDER BY blocks.created_at DESC`,
+    [req.userId],
+  ).map(toPublicUser);
+  res.json({ users });
+});
+
+// Block someone: any friendship or request between you goes, and neither of
+// you can find or ask the other again until it's undone.
+friendsRouter.post("/blocked", validate(z.object({ userId: z.string().min(1) })), (req, res) => {
+  const target = getUserRow(req.body.userId);
+  if (!target) throw notFound("No such user");
+  if (target.id === req.userId) throw badRequest("You can't block yourself");
+  transaction(() => {
+    run(
+      `DELETE FROM friendships
+       WHERE (requester_id = :me AND addressee_id = :other) OR (requester_id = :other AND addressee_id = :me)`,
+      { me: req.userId, other: target.id },
+    );
+    run("INSERT OR IGNORE INTO blocks (blocker_id, blocked_id, created_at) VALUES (?, ?, ?)", [
+      req.userId,
+      target.id,
+      Date.now(),
+    ]);
+  });
+  res.status(201).json({ user: toPublicUser(target) });
+});
+
+friendsRouter.delete("/blocked/:userId", validate(userParam, "params"), (req, res) => {
+  const { changes } = run("DELETE FROM blocks WHERE blocker_id = ? AND blocked_id = ?", [
+    req.userId,
+    req.params.userId,
+  ]);
+  if (!changes) throw notFound("You haven't blocked this user");
+  res.status(204).end();
+});
 
 friendsRouter.post("/requests/:userId/accept", validate(userParam, "params"), (req, res) => {
   const { changes } = run(

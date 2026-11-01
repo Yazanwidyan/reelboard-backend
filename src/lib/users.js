@@ -80,5 +80,15 @@ export const areFriends = (a, b) =>
     ),
   );
 
+// Either of them blocked the other.
+export const isBlocked = (a, b) =>
+  Boolean(
+    get(
+      `SELECT 1 FROM blocks
+       WHERE (blocker_id = :a AND blocked_id = :b) OR (blocker_id = :b AND blocked_id = :a)`,
+      { a, b },
+    ),
+  );
+
 // "@sam" → "sam" (handles are stored without the "@", compared case-insensitively).
 export const normalizeHandle = (handle) => handle.trim().replace(/^@/, "");

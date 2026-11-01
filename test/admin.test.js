@@ -114,6 +114,26 @@ describe("admin", () => {
     assert.deepEqual(body.sagas[0], { id: SAGA.id, title: SAGA.title, kind: "franchise", films: 3, started: 1, finished: 0 });
   });
 
+  test("launch numbers: onboarding, Taste DNA shares, day-7 return", async () => {
+    const event = (token, name) => api("POST", "/events", { token, body: { name } });
+    assert.equal((await event(regular.token, "made_up")).status, 400);
+    assert.equal((await event(regular.token, "onboarding_completed")).status, 204);
+    assert.equal((await event(regular.token, "onboarding_completed")).status, 204, "a repeat is fine");
+    await event(regular.token, "dna_shared");
+    await event(boss.token, "onboarding_completed");
+
+    // Someone who joined ten days ago and opened the app today.
+    const old = await register("Old Timer", "oldtimer");
+    db.run("UPDATE users SET created_at = ? WHERE id = ?", [Date.now() - 10 * 24 * 60 * 60 * 1000, old.user.id]);
+    await event(old.token, "app_open");
+
+    const { launch } = (await api("GET", "/admin/stats", { token: boss.token })).body;
+    assert.deepEqual(launch.onboardingCompleted, { part: 2, whole: 3, rate: 0.667 });
+    assert.deepEqual(launch.dnaShared, { part: 1, whole: 2, rate: 0.5 });
+    assert.deepEqual(launch.day7Return, { part: 1, whole: 1, rate: 1 });
+    db.run("DELETE FROM users WHERE id = ?", [old.user.id]);
+  });
+
   test("users: search, detail, delete (not yourself)", async () => {
     const found = await api("GET", "/admin/users?q=regular", { token: boss.token });
     assert.deepEqual(found.body.users.map((user) => user.handle), ["@regularjoe"]);
