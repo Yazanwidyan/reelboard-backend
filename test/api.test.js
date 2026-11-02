@@ -371,6 +371,7 @@ describe("collections", () => {
 
     const [first, ...rest] = body.paths;
     assert.equal(first.id, "saga-gothams-guardian", "2 left beats 3 left");
+    assert.equal(first.subject, "Dark Knight", "what it's about, in plain words (data/curation.json)");
     assert.equal(first.watched, 1);
     assert.equal(first.total, 3);
     assert.equal(first.next.length, 2);

@@ -9,6 +9,7 @@ import { requireAdmin } from "./middleware/admin.js";
 import { requireAuth } from "./middleware/auth.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import { idempotency } from "./middleware/idempotency.js";
+import { rateLimit } from "./middleware/rateLimit.js";
 import activityRoutes from "./routes/activity.js";
 import adminRoutes from "./routes/admin.js";
 import authRoutes from "./routes/auth.js";
@@ -16,7 +17,7 @@ import boardRoutes from "./routes/boards.js";
 import challengeRoutes from "./routes/challenges.js";
 import collectionRoutes from "./routes/collections.js";
 import communityRoutes from "./routes/community.js";
-import eventRoutes from "./routes/events.js";
+import eventRoutes, { deviceRouter } from "./routes/events.js";
 import { friendsRouter, usersRouter } from "./routes/friends.js";
 import libraryRoutes from "./routes/library.js";
 import meRoutes from "./routes/me.js";
@@ -63,6 +64,7 @@ export const createApp = () => {
   // Public
   app.use("/api/auth", authRoutes);
   app.use("/api/movies", movieRoutes);
+  app.use("/api/device-events", rateLimit({ windowMs: 60 * 1000, max: 30 }), deviceRouter);
 
   // Signed in. Changes may carry an Idempotency-Key (see middleware/idempotency.js).
   const signedIn = [requireAuth, idempotency];

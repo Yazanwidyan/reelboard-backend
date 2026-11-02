@@ -122,7 +122,17 @@ router.get("/stats", (req, res) => {
   // they stop (sign-up itself is the first step: everyone here did it).
   const reached = (name) =>
     count(`SELECT COUNT(*) AS n FROM users WHERE created_at > ? AND ${did(name)}`, [since(30)]);
+  // Before an account: phones (by their own random id) that saw the
+  // welcome screen, tapped a way to sign in, and signed in.
+  const devices = (name) =>
+    count("SELECT COUNT(DISTINCT device_id) AS n FROM device_events WHERE name = ? AND created_at > ?", [
+      name,
+      since(30),
+    ]);
   const funnel = {
+    welcomeViewed: devices("welcome_viewed"),
+    signinTapped: devices("signin_tapped"),
+    signedInDevices: devices("signed_in"),
     signedUp: recent,
     seen: reached("onboarding_seen"),
     dna: reached("onboarding_dna"),
@@ -130,6 +140,13 @@ router.get("/stats", (req, res) => {
     completed: onboarded,
     skipped: reached("onboarding_skipped"),
     notificationsAllowed: reached("notifications_allowed"),
+    pickAccepted: reached("pick_accepted"),
+    pickWatched: reached("pick_watched"),
+    pickLater: reached("pick_later"),
+    nudgeWatched: reached("nudge_watched"),
+    nudgeNotWatched: reached("nudge_not_watched"),
+    // Activation: tiered the film the morning question asked about.
+    activated: reached("pick_tiered"),
   };
 
   res.json({
@@ -137,6 +154,9 @@ router.get("/stats", (req, res) => {
       onboardingCompleted: rate(onboarded, recent),
       dnaShared: rate(shared, onboarded),
       day7Return: rate(returned, weekOld),
+      // How often a pick for tonight is actually watched — whether the
+      // taste is any good.
+      pickAcceptance: rate(funnel.pickWatched, funnel.pickAccepted),
       funnel,
     },
     users: {

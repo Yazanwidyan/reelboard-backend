@@ -19,7 +19,18 @@ export const EVENTS = [
   "onboarding_skipped",
   "notifications_allowed",
   "dna_shared",
+  // The taste metric: a pick for tonight taken, then watched.
+  "pick_accepted",
+  "pick_watched",
+  // Onboarding's pick saved for later instead ("Not tonight").
+  "pick_later",
+  // The morning question: watched it or not — and the activation, a tier
+  // for the film it asked about.
+  "nudge_watched",
+  "nudge_not_watched",
+  "pick_tiered",
 ];
+export const DEVICE_EVENTS = ["welcome_viewed", "signin_tapped", "signed_in"];
 
 // Once per person, event and day is all that's kept.
 router.post("/", validate(z.object({ name: z.enum(EVENTS) })), (req, res) => {
@@ -32,5 +43,23 @@ router.post("/", validate(z.object({ name: z.enum(EVENTS) })), (req, res) => {
   ]);
   res.status(204).end();
 });
+
+// Mounted at /api/device-events, with no sign-in: what happens before an
+// account exists, by a random id the phone made for itself.
+export const deviceRouter = Router();
+deviceRouter.post(
+  "/",
+  validate(z.object({ deviceId: z.string().regex(/^[A-Za-z0-9-]{8,64}$/), name: z.enum(DEVICE_EVENTS) })),
+  (req, res) => {
+    const now = Date.now();
+    run("INSERT OR IGNORE INTO device_events (device_id, name, day, created_at) VALUES (?, ?, ?, ?)", [
+      req.body.deviceId,
+      req.body.name,
+      Math.floor(now / DAY),
+      now,
+    ]);
+    res.status(204).end();
+  },
+);
 
 export default router;

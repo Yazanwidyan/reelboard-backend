@@ -135,6 +135,15 @@ describe("admin", () => {
     assert.equal(launch.funnel.signedUp, 3);
     assert.equal(launch.funnel.completed, 2);
     assert.equal(launch.funnel.pick, 1);
+    assert.deepEqual(launch.pickAcceptance, { part: 0, whole: 0, rate: null });
+
+    // Before sign-in: by the phone's own id, no account needed.
+    const device = (name) => api("POST", "/device-events", { body: { deviceId: "phone-1234-abcd", name } });
+    assert.equal((await device("welcome_viewed")).status, 204);
+    assert.equal((await device("welcome_viewed")).status, 204, "once a day is kept");
+    assert.equal((await device("made_up")).status, 400);
+    const after = (await api("GET", "/admin/stats", { token: boss.token })).body.launch.funnel;
+    assert.equal(after.welcomeViewed, 1);
     db.run("DELETE FROM users WHERE id = ?", [old.user.id]);
   });
 

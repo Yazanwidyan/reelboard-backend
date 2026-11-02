@@ -103,6 +103,8 @@ const build = (movies, sagas) => {
     .map((collection) => ({
       ...collection,
       id: `director-essentials-${slugify(collection.title)}`,
+      // Not all their films — said so wherever it's counted.
+      essentials: true,
       movieIds: collection.movieIds
         .map((id) => movieById.get(id))
         .sort((a, b) => a.rank - b.rank)
@@ -130,15 +132,18 @@ let version = 0;
 export const collectionsVersion = () => version;
 
 // Who an actor's or a director's saga is about ("Al Pacino"), so a movie
-// page can point their name at it. build-pool stores it as `person`; sagas
-// built before that get it from data/curation.json.
+// page can point their name at it, and what any saga is about in plain
+// words — its `subject` ("Harry Potter", "Pixar"; a person's saga, the
+// person) — for the app to lead with, its playful title ("Potterhead")
+// second. build-pool stores `person`; sagas built before that, and every
+// `subject`, come from data/curation.json.
 const curatedPeople = () => {
   try {
     return new Map(
-      (readCuration().sagas ?? []).map((item) => [
-        `saga-${item.id}`,
-        item.from?.actor ?? item.from?.director ?? item.person ?? null,
-      ]),
+      (readCuration().sagas ?? []).map((item) => {
+        const person = item.from?.actor ?? item.from?.director ?? item.person ?? null;
+        return [`saga-${item.id}`, { person, subject: item.subject ?? person }];
+      }),
     );
   } catch {
     return new Map();
@@ -151,11 +156,15 @@ const collections = () => {
     const inPool = new Set(movies.map((movie) => movie.id));
     const people = curatedPeople();
     const sagas = readSagas()
-      .map((saga) => ({
-        ...saga,
-        person: saga.person ?? people.get(saga.id) ?? null,
-        movieIds: saga.movieIds.filter((id) => inPool.has(id)),
-      }))
+      .map((saga) => {
+        const person = saga.person ?? people.get(saga.id)?.person ?? null;
+        return {
+          ...saga,
+          person,
+          subject: saga.subject ?? people.get(saga.id)?.subject ?? person ?? saga.title,
+          movieIds: saga.movieIds.filter((id) => inPool.has(id)),
+        };
+      })
       .filter((saga) => saga.movieIds.length > 0);
     built = build(movies, sagas);
   }
@@ -220,8 +229,11 @@ export const getDirectorCollection = (name) => {
 // Every collection you're part-way through — the sagas, and directors'
 // films in the pool (their best-known 8 when there are more; a director
 // with a saga of their own has just the saga) — closest to finished first:
-//   [{ id, type, kind, title, person, art, movieIds, watched, total,
-//      next: [movie ids, best first] }]
+//   [{ id, type, kind, title, subject, essentials, person, art, movieIds,
+//      watched, total, next: [movie ids, best first] }]
+// `subject`: what it's about in plain words ("Harry Potter", "Christopher
+// Nolan") — the app leads with it. `essentials`: a director's best-known
+// films, not all of them.
 // `next`: the films you haven't seen, the pool's best-ranked first. Home
 // shows these as "Finish what you started", and Tonight says "2 left in…".
 export const getCollectionPaths = (watchedIds) => {
@@ -259,6 +271,8 @@ export const getCollectionPaths = (watchedIds) => {
       type: collection.type,
       kind: collection.kind ?? (collection.type === "director" ? "director" : null),
       title: collection.title,
+      subject: collection.subject ?? collection.title,
+      essentials: !!collection.essentials,
       person: collection.person ?? (collection.type === "director" ? collection.title : null),
       art: collection.art ?? null,
       movieIds: collection.movieIds,

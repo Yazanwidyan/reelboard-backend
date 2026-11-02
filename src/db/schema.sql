@@ -326,3 +326,16 @@ CREATE TABLE IF NOT EXISTS events (
   PRIMARY KEY (user_id, name, day)
 );
 CREATE INDEX IF NOT EXISTS events_by_name ON events (name, created_at);
+
+-- The same, before anyone has an account: the welcome screen seen, a
+-- sign-in button tapped, signed in — counted by a random id the phone
+-- made for itself (nothing about the person), once per phone, event and
+-- day. It's what shows how many leave before signing in.
+CREATE TABLE IF NOT EXISTS device_events (
+  device_id  TEXT NOT NULL,
+  name       TEXT NOT NULL,
+  day        INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (device_id, name, day)
+);
+CREATE INDEX IF NOT EXISTS device_events_by_name ON device_events (name, created_at);
