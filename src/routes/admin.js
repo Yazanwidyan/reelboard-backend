@@ -118,11 +118,26 @@ router.get("/stats", (req, res) => {
     [since(37), since(7), 7 * DAY],
   );
 
+  // How far the same people got through onboarding, step by step — where
+  // they stop (sign-up itself is the first step: everyone here did it).
+  const reached = (name) =>
+    count(`SELECT COUNT(*) AS n FROM users WHERE created_at > ? AND ${did(name)}`, [since(30)]);
+  const funnel = {
+    signedUp: recent,
+    seen: reached("onboarding_seen"),
+    dna: reached("onboarding_dna"),
+    pick: reached("onboarding_pick"),
+    completed: onboarded,
+    skipped: reached("onboarding_skipped"),
+    notificationsAllowed: reached("notifications_allowed"),
+  };
+
   res.json({
     launch: {
       onboardingCompleted: rate(onboarded, recent),
       dnaShared: rate(shared, onboarded),
       day7Return: rate(returned, weekOld),
+      funnel,
     },
     users: {
       total: count("SELECT COUNT(*) AS n FROM users"),

@@ -4,12 +4,22 @@ import { run } from "../db/index.js";
 import { validate } from "../middleware/validate.js";
 
 // Mounted at /api/events — the few things the app reports so the admin
-// dashboard can show the launch numbers: did people finish onboarding,
-// share their Taste DNA, and come back a week later.
+// dashboard can show the launch numbers: how far people get through
+// onboarding (each step, finished or skipped), whether they let it send
+// reminders, share their Taste DNA, and come back a week later.
 const router = Router();
 
 const DAY = 24 * 60 * 60 * 1000;
-export const EVENTS = ["app_open", "onboarding_completed", "dna_shared"];
+export const EVENTS = [
+  "app_open",
+  "onboarding_seen",
+  "onboarding_dna",
+  "onboarding_pick",
+  "onboarding_completed",
+  "onboarding_skipped",
+  "notifications_allowed",
+  "dna_shared",
+];
 
 // Once per person, event and day is all that's kept.
 router.post("/", validate(z.object({ name: z.enum(EVENTS) })), (req, res) => {

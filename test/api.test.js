@@ -389,6 +389,14 @@ describe("collections", () => {
     assert.ok((await api("GET", "/me", { token: own })).body.library.paths.length > 0);
   });
 
+  test("a movie's page says which collection its director's name opens", async () => {
+    const { body } = await api("GET", `/movies/${NOLAN.darkKnight}`, { token });
+    assert.ok(body.directorCollection, JSON.stringify(body.directorCollection));
+    const page = await api("GET", `/collections/${body.directorCollection.id}`, { token });
+    assert.equal(page.status, 200);
+    assert.ok(page.body.collection.movieIds.includes(NOLAN.darkKnight));
+  });
+
   test("featured: every saga; lists still open for browsing; a movie's own", async () => {
     const featured = await api("GET", "/collections", { token });
     assert.equal(featured.status, 200);

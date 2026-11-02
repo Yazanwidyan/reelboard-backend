@@ -1,7 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
 import { all, catalogMeta } from "../db/index.js";
-import { attachCollections, getCollectionsForMovie, getSagasForPeople, SAGA } from "../lib/collections.js";
+import {
+  attachCollections,
+  getCollectionsForMovie,
+  getDirectorCollection,
+  getSagasForPeople,
+  SAGA,
+} from "../lib/collections.js";
 import { notFound } from "../lib/errors.js";
 import {
   applyPreferenceFilters,
@@ -293,7 +299,8 @@ const idParam = validate(z.object({ id: movieId }), "params");
 // GET /api/movies/:id — any movie's page: everything, including cast with
 // photos, directors and writers — and the sagas it's in, plus the sagas of
 // the people in it (tapping Al Pacino opens his), with cards for their
-// first films.
+// first films — and `directorCollection` ({ id, title } or null), what its
+// director's name opens.
 router.get("/:id", tmdbRoute, idParam, async (req, res) => {
   const { fetchedAt, ...movie } = await ensureMovie(req.params.id);
   const people = [
@@ -304,7 +311,7 @@ router.get("/:id", tmdbRoute, idParam, async (req, res) => {
   ];
   const sagas = getCollectionsForMovie(movie.id).filter((collection) => collection.type === SAGA);
   const list = [...new Set([...sagas, ...getSagasForPeople(people)])];
-  res.json({ movie, ...attachCollections([], list) });
+  res.json({ movie, ...attachCollections([], list), directorCollection: getDirectorCollection(movie.director) });
 });
 
 // GET /api/movies/:id/similar — TMDB's recommendations for it (or, without

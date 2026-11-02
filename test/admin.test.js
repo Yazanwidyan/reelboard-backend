@@ -117,6 +117,7 @@ describe("admin", () => {
   test("launch numbers: onboarding, Taste DNA shares, day-7 return", async () => {
     const event = (token, name) => api("POST", "/events", { token, body: { name } });
     assert.equal((await event(regular.token, "made_up")).status, 400);
+    for (const step of ["onboarding_seen", "onboarding_dna", "onboarding_pick"]) await event(regular.token, step);
     assert.equal((await event(regular.token, "onboarding_completed")).status, 204);
     assert.equal((await event(regular.token, "onboarding_completed")).status, 204, "a repeat is fine");
     await event(regular.token, "dna_shared");
@@ -131,6 +132,9 @@ describe("admin", () => {
     assert.deepEqual(launch.onboardingCompleted, { part: 2, whole: 3, rate: 0.667 });
     assert.deepEqual(launch.dnaShared, { part: 1, whole: 2, rate: 0.5 });
     assert.deepEqual(launch.day7Return, { part: 1, whole: 1, rate: 1 });
+    assert.equal(launch.funnel.signedUp, 3);
+    assert.equal(launch.funnel.completed, 2);
+    assert.equal(launch.funnel.pick, 1);
     db.run("DELETE FROM users WHERE id = ?", [old.user.id]);
   });
 

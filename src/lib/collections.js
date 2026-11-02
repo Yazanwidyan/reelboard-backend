@@ -202,6 +202,19 @@ export const getPersonalCollections = (watchedIds, unlockedIds = []) => {
   return [...found.values()];
 };
 
+// A director's collection, to open from their name: their saga if they
+// have one, else their best-known films (a big filmography), else all their
+// films in the pool (two or more) — { id, title } or null.
+export const getDirectorCollection = (name) => {
+  if (!name) return null;
+  const { all, essentials } = collections();
+  const found =
+    getSagas().find((saga) => saga.person === name) ??
+    essentials.find((collection) => collection.title === name) ??
+    all.find((collection) => collection.type === "director" && collection.title === name);
+  return found ? { id: found.id, title: found.title } : null;
+};
+
 // ---- Collections in progress -------------------------------------------------
 
 // Every collection you're part-way through — the sagas, and directors'
