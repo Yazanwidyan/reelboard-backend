@@ -184,16 +184,56 @@ export const applyPreferenceFilters = (movies, preferences = {}) =>
       inRange(movie.runtime, RUNTIME_RANGES[preferences.runtime]),
   );
 
-export const matchesSearch = (movie, term) => {
-  const needle = term.trim().toLowerCase();
-  if (!needle) return true;
-  return (
-    movie.title.toLowerCase().includes(needle) ||
-    movie.director?.toLowerCase().includes(needle) ||
-    movie.cast.some((name) => name.toLowerCase().includes(needle)) ||
-    String(movie.year) === needle
-  );
+// ---- Search (the app's utils/movieSearch, in short) -----------------------
+//
+// Forgiving the way people type: case, accents, punctuation and spaces
+// don't matter ("spiderman" finds "Spider-Man", "amelie" "Amélie"), Arabic
+// without its vowel marks; any script's letters count.
+const normalizeSearch = (text) =>
+  String(text ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f\u064b-\u065f\u0670\u0640]/g, "")
+    .toLowerCase()
+    .replace(/\u0629/g, "\u0647")
+    .replace(/\u0649/g, "\u064a")
+    .replace(/['’`]/g, "")
+    .replace(/&/g, " and ")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+const squash = (text) => text.replace(/ /g, "");
+// Shorter than this, only the start of a word matches, spaces and all ("it"
+// isn't "I, Tonya").
+const MIN_ANYWHERE = 3;
+
+// 4 the whole text, 3 its start, 2 a word's start, 1 anywhere, 0 none.
+const strength = (query, text) => {
+  if (!text) return 0;
+  const q = squash(query);
+  const t = squash(text);
+  if (text === query || t === q) return 4;
+  if (text.startsWith(query)) return 3;
+  if (q.length >= MIN_ANYWHERE && t.startsWith(q)) return 3;
+  if (` ${text}`.includes(` ${query}`)) return 2;
+  if (q.length < MIN_ANYWHERE) return 0;
+  return text.includes(query) || t.includes(q) ? 1 : 0;
 };
+
+// How well a movie matches a search, 0 (not at all) up: its title first
+// ("the" dropped too), then its director, its cast, its year.
+export const searchScore = (movie, term) => {
+  const query = normalizeSearch(term);
+  if (!query) return 1;
+  const title = normalizeSearch(movie.title);
+  const byTitle = Math.max(strength(query, title), strength(query, title.replace(/^(the|a|an) /, "")));
+  if (byTitle) return 100 + byTitle * 10;
+  const byDirector = strength(query, normalizeSearch(movie.director));
+  if (byDirector > 1) return 60 + byDirector * 5;
+  const byCast = Math.max(0, ...(movie.cast ?? []).map((name) => strength(query, normalizeSearch(name))));
+  if (byCast > 1) return 40 + byCast * 5;
+  if (query === String(movie.year)) return 30;
+  return byDirector || byCast ? 10 : 0;
+};
+
 
 // ---- Recommendations (mirrors the app's services/recommendations.js) ------
 

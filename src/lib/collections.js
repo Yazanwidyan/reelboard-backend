@@ -16,20 +16,24 @@ import { getAllMovies, getMovieById } from "./movies.js";
 //   lists    worked out from the pool, for browsing only ("More from
 //            Christopher Nolan"): franchises (3+ films), directors (2+),
 //            actors (3+ top-billed), decades and genres (trimmed to the 15
-//            best-ranked: "Best of the 1990s"). Never achievements.
+//            best-ranked: "Best of the 1990s"). Never achievements, never
+//            progress.
 // List ids are `${type}-${slugify(title)}`, as the app has always named
 // them; sagas' are `saga-${id}`.
+//
+// Directors and actors the sagas don't cover yet are *drafts*
+// (getCollectionDrafts): the admin site shows them, and one becomes a
+// saga only when someone approves it there — its films picked then and
+// kept, so a new release never un-finishes it.
 
 const MIN_FRANCHISE_SIZE = 3;
 const MIN_COLLECTION_SIZE = 2;
 const MIN_ACTOR_COLLECTION_SIZE = 3;
 const CURATED_SIZE = 15;
-// A director's films in the pool count as a collection of their own once
-// there are this many — so tastes the sagas don't cover still have
-// something to finish…
-const MIN_DIRECTOR_PATH = 3;
-// …and past this many, it's their best-known films that count.
-const ESSENTIALS = 8;
+// A draft: a director's or an actor's films in the pool, once there are
+// this many — their best-known DRAFT_SIZE when there are more.
+const MIN_DRAFT_SIZE = 3;
+const DRAFT_SIZE = 8;
 const PATHS = 10;
 const NEXT_PER_PATH = 3;
 export const SAGA = "saga";
@@ -95,24 +99,6 @@ const build = (movies, sagas) => {
   });
   const all = [...byId.values()];
   const sagaList = all.filter((collection) => collection.type === SAGA);
-  // A big filmography can't be finished; its best-known few can. These
-  // open like any collection (byId) but aren't listed with a movie's own.
-  const movieById = new Map(movies.map((movie) => [movie.id, movie]));
-  const essentials = director
-    .filter((collection) => collection.movieIds.length > ESSENTIALS)
-    .map((collection) => ({
-      ...collection,
-      id: `director-essentials-${slugify(collection.title)}`,
-      // Not all their films — said so wherever it's counted.
-      essentials: true,
-      movieIds: collection.movieIds
-        .map((id) => movieById.get(id))
-        .sort((a, b) => a.rank - b.rank)
-        .slice(0, ESSENTIALS)
-        .sort(byYear)
-        .map((movie) => movie.id),
-    }));
-  essentials.forEach((collection) => byId.set(collection.id, collection));
   const byMovie = new Map();
   all.forEach((collection) =>
     collection.movieIds.forEach((id) => {
@@ -120,7 +106,7 @@ const build = (movies, sagas) => {
       byMovie.get(id).push(collection);
     }),
   );
-  return { all, byId, byMovie, sagas: sagaList, essentials };
+  return { all, byId, byMovie, sagas: sagaList, people: [...director, ...actor] };
 };
 
 // The pool and the sagas don't change while the server runs, so they're
@@ -211,47 +197,60 @@ export const getPersonalCollections = (watchedIds, unlockedIds = []) => {
   return [...found.values()];
 };
 
-// A director's collection, to open from their name: their saga if they
-// have one, else their best-known films (a big filmography), else all their
-// films in the pool (two or more) — { id, title } or null.
+// A director's collection, to open from their name: their saga — { id,
+// title } — or null (a draft nobody has approved isn't one).
 export const getDirectorCollection = (name) => {
   if (!name) return null;
-  const { all, essentials } = collections();
-  const found =
-    getSagas().find((saga) => saga.person === name) ??
-    essentials.find((collection) => collection.title === name) ??
-    all.find((collection) => collection.type === "director" && collection.title === name);
+  const found = getSagas().find((saga) => saga.person === name);
   return found ? { id: found.id, title: found.title } : null;
+};
+
+// ---- Drafts ------------------------------------------------------------------
+
+// The draft for a director or an actor: { key, kind, person, movieIds,
+// total } — `key` "director:Name" / "actor:Name", what a dismissal keeps;
+// `movieIds` their best-known DRAFT_SIZE films in the pool, oldest first;
+// `total` all of their films in the pool.
+const toDraft = (collection) => {
+  const films = collection.movieIds.map(getMovieById).filter(Boolean);
+  return {
+    key: `${collection.type}:${collection.title}`,
+    kind: collection.type,
+    person: collection.title,
+    movieIds: [...films]
+      .sort((a, b) => a.rank - b.rank)
+      .slice(0, DRAFT_SIZE)
+      .sort(byYear)
+      .map((movie) => movie.id),
+    total: films.length,
+  };
+};
+
+// Every draft: directors and actors with MIN_DRAFT_SIZE films in the pool,
+// no saga about them, and not in `dismissed` (keys).
+export const getCollectionDrafts = ({ dismissed = [] } = {}) => {
+  const covered = new Set(getSagas().map((saga) => saga.person).filter(Boolean));
+  const skipped = new Set(dismissed);
+  return collections()
+    .people.filter((collection) => collection.movieIds.length >= MIN_DRAFT_SIZE && !covered.has(collection.title))
+    .map(toDraft)
+    .filter((draft) => !skipped.has(draft.key));
 };
 
 // ---- Collections in progress -------------------------------------------------
 
-// Every collection you're part-way through — the sagas, and directors'
-// films in the pool (their best-known 8 when there are more; a director
-// with a saga of their own has just the saga) — closest to finished first:
-//   [{ id, type, kind, title, subject, essentials, person, art, movieIds,
-//      watched, total, next: [movie ids, best first] }]
+// Every saga you're part-way through, closest to finished first:
+//   [{ id, type, kind, title, subject, person, art, movieIds, watched,
+//      total, next: [movie ids, best first] }]
 // `subject`: what it's about in plain words ("Harry Potter", "Christopher
-// Nolan") — the app leads with it. `essentials`: a director's best-known
-// films, not all of them.
+// Nolan") — the app leads with it.
 // `next`: the films you haven't seen, the pool's best-ranked first. Home
 // shows these as "Finish what you started", and Tonight says "2 left in…".
 export const getCollectionPaths = (watchedIds) => {
   const watched = new Set(watchedIds);
-  const sagaPeople = new Set(getSagas().map((saga) => saga.person).filter(Boolean));
-  const { all, essentials } = collections();
-  const directors = [
-    ...all.filter(
-      (collection) =>
-        collection.type === "director" &&
-        collection.movieIds.length >= MIN_DIRECTOR_PATH &&
-        collection.movieIds.length <= ESSENTIALS,
-    ),
-    ...essentials,
-  ].filter((collection) => !sagaPeople.has(collection.title));
   const rankOf = (id) => getMovieById(id)?.rank ?? Number.MAX_SAFE_INTEGER;
-  // Closest to done first; then sagas, then the bigger and better-known.
-  return [...getSagas(), ...directors]
+  // Closest to done first; then the bigger and better-known.
+  return getSagas()
     .map((collection) => {
       const seen = collection.movieIds.filter((id) => watched.has(id)).length;
       const best = Math.min(...collection.movieIds.map(rankOf));
@@ -261,7 +260,6 @@ export const getCollectionPaths = (watchedIds) => {
     .sort(
       (a, b) =>
         a.total - a.seen - (b.total - b.seen) ||
-        (b.collection.type === SAGA) - (a.collection.type === SAGA) ||
         b.seen - a.seen ||
         a.best - b.best,
     )
@@ -269,11 +267,10 @@ export const getCollectionPaths = (watchedIds) => {
     .map(({ collection, seen, total }) => ({
       id: collection.id,
       type: collection.type,
-      kind: collection.kind ?? (collection.type === "director" ? "director" : null),
+      kind: collection.kind ?? null,
       title: collection.title,
       subject: collection.subject ?? collection.title,
-      essentials: !!collection.essentials,
-      person: collection.person ?? (collection.type === "director" ? collection.title : null),
+      person: collection.person ?? null,
       art: collection.art ?? null,
       movieIds: collection.movieIds,
       watched: seen,

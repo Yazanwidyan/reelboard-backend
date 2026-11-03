@@ -17,7 +17,7 @@ import {
   getAllMovies,
   getGenres,
   getMovieById,
-  matchesSearch,
+  searchScore,
   moviesFor,
   RUNTIME_RANGES,
   toLean,
@@ -95,7 +95,13 @@ router.get("/", validate(listSchema, "query"), (req, res) => {
     ? ids.map(getMovieById).filter(Boolean)
     : getAllMovies();
   movies = applyPreferenceFilters(movies, { genres, decade, runtime, minRating });
-  if (q) movies = movies.filter((movie) => matchesSearch(movie, q));
+  // A search: its best matches first (then the pool's order), unless
+  // another sort was asked for.
+  const scores = new Map();
+  if (q) {
+    movies.forEach((movie) => scores.set(movie.id, searchScore(movie, q)));
+    movies = movies.filter((movie) => scores.get(movie.id) > 0);
+  }
   if (director) {
     const needle = director.toLowerCase();
     movies = movies.filter((movie) => movie.director?.toLowerCase() === needle);
@@ -103,7 +109,10 @@ router.get("/", validate(listSchema, "query"), (req, res) => {
   if (!ids) {
     // Rank reads best ascending; everything else defaults to high → low.
     const direction = (order ?? (sort === "rank" || sort === "title" ? "asc" : "desc")) === "asc" ? 1 : -1;
-    movies = [...movies].sort((a, b) => direction * SORTS[sort](a, b));
+    movies = [...movies].sort(
+      (a, b) =>
+        (q && sort === "rank" ? scores.get(b.id) - scores.get(a.id) : 0) || direction * SORTS[sort](a, b),
+    );
   }
 
   const total = movies.length;

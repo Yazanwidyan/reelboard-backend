@@ -29,6 +29,8 @@ export const EVENTS = [
   "nudge_watched",
   "nudge_not_watched",
   "pick_tiered",
+  // Home's invite card (no friends yet, enough tiers to compare): sent.
+  "invite_sent",
 ];
 export const DEVICE_EVENTS = ["welcome_viewed", "signin_tapped", "signed_in"];
 

@@ -251,6 +251,47 @@ describe("admin", () => {
     assert.equal(await ranks(), ranksBefore);
   });
 
+  test("drafts: a director with no saga, dismissed and back, approved into a saga that keeps its films", async () => {
+    const drafts = async () => (await api("GET", "/admin/collection-drafts", { token: boss.token })).body;
+    const key = "director:Christopher Nolan";
+    const nolan = (await drafts()).drafts.find((draft) => draft.key === key);
+    assert.ok(nolan, "Nolan has films in the pool and no saga");
+    assert.ok(nolan.movieIds.length >= 3 && nolan.movieIds.length <= 8);
+    assert.equal(nolan.movies.length, nolan.movieIds.length);
+    assert.equal(typeof nolan.people, "number");
+    // Not a collection in the app until it's approved.
+    const page = async () => (await api("GET", "/movies/155", { token: regular.token })).body.directorCollection;
+    assert.equal(await page(), null);
+
+    const dismiss = (dismissed) => api("POST", "/admin/collection-drafts/dismissed", { token: boss.token, body: { key, dismissed } });
+    assert.equal((await dismiss(true)).status, 200);
+    assert.ok(!(await drafts()).drafts.some((draft) => draft.key === key));
+    assert.ok(curation().draftsDismissed.includes(key));
+    await dismiss(false);
+    assert.ok((await drafts()).drafts.some((draft) => draft.key === key));
+    assert.equal(curation().draftsDismissed, undefined);
+
+    const approved = await api("POST", "/admin/sagas", {
+      token: boss.token,
+      body: {
+        id: "christopher-nolan",
+        title: "Christopher Nolan",
+        kind: "director",
+        movieIds: nolan.movieIds,
+        person: "Christopher Nolan",
+        ranks: [{ title: "Started", at: 1 }, { title: "Finished" }],
+      },
+    });
+    assert.equal(approved.status, 201, JSON.stringify(approved.body));
+    const curated = curation().sagas.find((item) => item.id === "christopher-nolan");
+    assert.deepEqual(curated.from, { ids: nolan.movieIds }, "its films picked, so they stay");
+    assert.equal(curated.person, "Christopher Nolan");
+    assert.ok(!(await drafts()).drafts.some((draft) => draft.key === key));
+    assert.deepEqual(await page(), { id: "saga-christopher-nolan", title: "Christopher Nolan" });
+
+    await api("DELETE", "/admin/sagas/saga-christopher-nolan", { token: boss.token });
+  });
+
   test("sagas: rules previewed from TMDB, ranks by share, a picked cover", async () => {
     const preview = await api("POST", "/admin/sagas/preview", {
       token: boss.token,

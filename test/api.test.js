@@ -235,6 +235,16 @@ describe("movies", () => {
 
     const search = await api("GET", "/movies?q=heath%20ledger");
     assert.ok(search.body.movies.some((movie) => movie.title === "The Dark Knight"));
+    // Typed the way people type: no hyphen, no accent — best match first.
+    const spider = await api("GET", "/movies?q=spiderman");
+    assert.ok(spider.body.movies.length >= 5);
+    assert.ok(spider.body.movies.every((movie) => movie.title.startsWith("Spider-Man")));
+    assert.equal((await api("GET", "/movies?q=amelie")).body.movies[0].title, "Amélie");
+    assert.equal((await api("GET", "/movies?q=wall%20e")).body.movies[0].title, "WALL·E");
+    // Two letters only match the start of a word.
+    assert.ok((await api("GET", "/movies?q=it&limit=100")).body.movies.every((movie) =>
+      /(^|[^\p{L}\p{N}])it/iu.test(`${movie.title} ${movie.director} ${movie.cast.join(" ")}`),
+    ));
 
     const byRating = await api("GET", "/movies?sort=rating&limit=5");
     const ratings = byRating.body.movies.map((movie) => movie.rating);

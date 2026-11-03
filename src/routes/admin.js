@@ -3,7 +3,7 @@ import { z } from "zod";
 import { all, catalogMeta, fromJSON, get, readSagas, run, toJSON, transaction, writeSagas } from "../db/index.js";
 import { listActivity } from "../lib/activity.js";
 import { listAdminLog, logAdmin } from "../lib/adminLog.js";
-import { getSagas, resetCollections, SAGA } from "../lib/collections.js";
+import { getCollectionDrafts, getSagas, resetCollections, SAGA } from "../lib/collections.js";
 import { readCuration, updateCuration } from "../lib/curation.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { ensureMovie, ensureMovies, getMovieById, resetMovieCache } from "../lib/movies.js";
@@ -616,6 +616,47 @@ router.get("/sagas/:id", sagaParam, (req, res) => {
   });
 });
 
+// ---- Drafts: directors and actors with films in the pool and no saga yet.
+// Approving one is creating its saga (POST /sagas, its films picked — so
+// they stay as they are); dismissing one keeps it off the list, in
+// curation.json's `draftsDismissed`.
+
+// How many people have seen two or more of a draft's films — who'd have it
+// under way the moment it's approved.
+const draftDemand = (movieIds) =>
+  get(
+    `SELECT COUNT(*) AS n FROM (SELECT user_id FROM watched WHERE movie_id IN (${movieIds.map(() => "?").join(",")})
+     GROUP BY user_id HAVING COUNT(*) >= 2)`,
+    movieIds,
+  ).n;
+
+router.get("/collection-drafts", (req, res) => {
+  const dismissed = readCuration().draftsDismissed ?? [];
+  const best = (draft) => Math.min(...draft.movieIds.map((id) => getMovieById(id)?.rank ?? Number.MAX_SAFE_INTEGER));
+  // Most wanted first; then the best-known.
+  const drafts = getCollectionDrafts({ dismissed })
+    .map((draft) => ({ ...draft, people: draftDemand(draft.movieIds), best: best(draft) }))
+    .sort((a, b) => b.people - a.people || a.best - b.best)
+    .map(({ best: _best, ...draft }) => ({ ...draft, movies: sagaCard(draft.movieIds) }));
+  res.json({ drafts, dismissed });
+});
+
+router.post(
+  "/collection-drafts/dismissed",
+  validate(z.object({ key: z.string().regex(/^(director|actor):.{1,80}$/), dismissed: z.boolean() })),
+  (req, res) => {
+    const { key, dismissed } = req.body;
+    const curation = updateCuration((current) => {
+      const list = (current.draftsDismissed ?? []).filter((item) => item !== key);
+      if (dismissed) list.push(key);
+      if (list.length > 0) current.draftsDismissed = list;
+      else delete current.draftsDismissed;
+    });
+    log(req, dismissed ? "draft.dismiss" : "draft.restore", { type: "draft", id: key }, `${dismissed ? "Dismissed" : "Brought back"} the draft ${quoted(key.replace(/^\w+:/, ""))}`);
+    res.json({ dismissed: curation.draftsDismissed ?? [] });
+  },
+);
+
 // ---- Saga rules: where its films come from, resolved like build-pool does.
 
 const MIN_FILMS = 3;
@@ -709,6 +750,9 @@ const sagaFields = {
   from: ruleFrom.optional(),
   ranks: z.array(rank).min(1).max(5),
   art: art.optional(),
+  // Who a director's or an actor's saga is about, when its films are
+  // picked (an approved draft) — a rule knows it already.
+  person: personName.optional(),
 };
 
 // Ranks as the curation keeps them (`at` a count or "all", or a `share`)
@@ -823,7 +867,7 @@ router.post(
       movieIds: films.movieIds,
       ranks: plan.counts,
       art: picked ?? films.ruleArt ?? fallbackArt(films.movies),
-      ...(films.person ? { person: films.person } : {}),
+      ...((films.person ?? req.body.person) ? { person: films.person ?? req.body.person } : {}),
     };
     updateCuration((curation) => {
       curation.sagas = [...(curation.sagas ?? []), toCurated(saga, { from: films.from, ranks: plan.curated, art: picked })];
