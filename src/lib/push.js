@@ -1,11 +1,12 @@
-import { all, get, run } from "../db/index.js";
+import { all, get, run, toJSON } from "../db/index.js";
 
 // Push notifications through Expo's push service
 // (https://docs.expo.dev/push-notifications/sending-notifications/). The app
 // registers each phone's Expo push token (POST /api/me/push-tokens); this
 // sends to every phone of the given people, in their own language, and
 // forgets tokens Expo says are gone. Sending never blocks or fails the
-// request that triggered it.
+// request that triggered it. Each one is also kept (the notifications
+// table) for the app's Notifications page — phone or no phone.
 
 const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 
@@ -45,7 +46,14 @@ const TEXT = {
   },
 };
 
-const languageOf = (userId) =>
+// Kept per person: the latest this many.
+const KEPT = 100;
+
+// A kept notification's words, in `language`: [title, body].
+export const notificationText = (kind, args, language) =>
+  TEXT[kind]?.[language === "ar" ? "ar" : "en"](...args) ?? ["", ""];
+
+export const languageOf = (userId) =>
   get("SELECT language FROM user_state WHERE user_id = ?", [userId])?.language === "ar" ? "ar" : "en";
 
 // When someone gives a film an S: the friends who saved it and haven't seen
@@ -59,14 +67,26 @@ export const notifyFriendsOfS = (userId, movieId, { friendIds, name, title }) =>
        AND NOT EXISTS (SELECT 1 FROM watched WHERE watched.user_id = watchlist.user_id AND watched.movie_id = ?)`,
     [movieId, ...friendIds, movieId],
   ).map((row) => row.user_id);
-  notify(savers, "friendLovedSaved", [name, title], `reelboard://movie/${movieId}`);
+  notify(savers, "friendLovedSaved", [name, title], `reelboard://movie/${movieId}`, { fromUserId: userId, movieId });
 };
 
 // `kind`: a key of TEXT. `args`: passed to its text. `url`: opened on tap
-// (a reelboard:// link the app knows).
-export const notify = (userIds, kind, args = [], url = null) => {
+// (a reelboard:// link the app knows). `fromUserId` / `movieId`: who and
+// what it's about, for the Notifications page's face or poster.
+export const notify = (userIds, kind, args = [], url = null, { fromUserId = null, movieId = null } = {}) => {
   const messages = [];
+  const now = Date.now();
   for (const userId of new Set(userIds)) {
+    run(
+      `INSERT INTO notifications (user_id, kind, args, url, from_user_id, movie_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [userId, kind, toJSON(args), url, fromUserId, movieId, now],
+    );
+    run(
+      `DELETE FROM notifications WHERE user_id = ? AND id NOT IN
+         (SELECT id FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ${KEPT})`,
+      [userId, userId],
+    );
     const [title, body] = TEXT[kind][languageOf(userId)](...args);
     for (const { token } of all("SELECT token FROM push_tokens WHERE user_id = ?", [userId])) {
       messages.push({ to: token, title, body, sound: "default", data: url ? { url } : {} });

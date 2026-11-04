@@ -25,6 +25,7 @@ import movieNightRoutes from "./routes/movieNights.js";
 import movieRoutes from "./routes/movies.js";
 import peopleRoutes from "./routes/people.js";
 import pushRoutes from "./routes/push.js";
+import notificationRoutes from "./routes/notifications.js";
 import rankRoutes from "./routes/ranks.js";
 import reportRoutes from "./routes/reports.js";
 import shareRoutes from "./routes/shares.js";
@@ -71,6 +72,7 @@ export const createApp = () => {
   app.use("/api/me/challenges", signedIn, challengeRoutes);
   app.use("/api/me/taste", signedIn, tasteRoutes);
   app.use("/api/me/push-tokens", signedIn, pushRoutes);
+  app.use("/api/me/notifications", signedIn, notificationRoutes);
   app.use("/api/me", signedIn, libraryRoutes);
   app.use("/api/me", signedIn, meRoutes);
   app.use("/api/boards", signedIn, boardRoutes);

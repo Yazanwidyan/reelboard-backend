@@ -254,6 +254,23 @@ CREATE TABLE IF NOT EXISTS push_tokens (
 );
 CREATE INDEX IF NOT EXISTS push_tokens_by_user ON push_tokens (user_id);
 
+-- What the server told someone (lib/push.js), kept for the app's
+-- Notifications page whether or not a phone showed it: `kind` one of
+-- push.js's TEXT, `args` its words (JSON), `url` what a tap opens, who
+-- it's from and the film it's about, and `read_at` once it's been seen.
+CREATE TABLE IF NOT EXISTS notifications (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kind         TEXT NOT NULL,
+  args         TEXT NOT NULL,
+  url          TEXT,
+  from_user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+  movie_id     TEXT,
+  created_at   INTEGER NOT NULL,
+  read_at      INTEGER
+);
+CREATE INDEX IF NOT EXISTS notifications_by_user ON notifications (user_id, created_at);
+
 -- The sagas: data/curation.json's hand-made collections, turned into movie
 -- ids, rank thresholds and artwork by `npm run build-pool`. One row each,
 -- in the curation's order; `definition` is the collection as the app gets

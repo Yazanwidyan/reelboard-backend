@@ -173,7 +173,7 @@ friendsRouter.post(
          WHERE requester_id = ? AND addressee_id = ?`,
         [Date.now(), target.id, req.userId],
       );
-      notify([target.id], "friendAccepted", [nameOf(req.userId)], FRIENDS_LINK);
+      notify([target.id], "friendAccepted", [nameOf(req.userId)], FRIENDS_LINK, { fromUserId: req.userId });
       return res.json({ relationship: "friends", user: toFriend(target) });
     }
     run(
@@ -181,7 +181,7 @@ friendsRouter.post(
        VALUES (?, ?, 'pending', ?)`,
       [req.userId, target.id, Date.now()],
     );
-    notify([target.id], "friendRequest", [nameOf(req.userId)], FRIENDS_LINK);
+    notify([target.id], "friendRequest", [nameOf(req.userId)], FRIENDS_LINK, { fromUserId: req.userId });
     res.status(201).json({ relationship: "outgoing", user: toPublicUser(target) });
   },
 );
@@ -233,7 +233,7 @@ friendsRouter.post("/requests/:userId/accept", validate(userParam, "params"), (r
     [Date.now(), req.params.userId, req.userId],
   );
   if (!changes) throw notFound("No pending request from this user");
-  notify([req.params.userId], "friendAccepted", [nameOf(req.userId)], FRIENDS_LINK);
+  notify([req.params.userId], "friendAccepted", [nameOf(req.userId)], FRIENDS_LINK, { fromUserId: req.userId });
   res.json({ relationship: "friends", user: toFriend(getUserRow(req.params.userId)) });
 });
 

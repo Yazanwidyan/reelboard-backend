@@ -156,7 +156,9 @@ router.post(
         req.userId,
         Date.now(),
       ]);
-      notify([night.host_id], "movieNightJoined", [nameOf(req.userId)], movieNightLink(night.code));
+      notify([night.host_id], "movieNightJoined", [nameOf(req.userId)], movieNightLink(night.code), {
+        fromUserId: req.userId,
+      });
     }
     respond(res, night.id, req.userId);
   },

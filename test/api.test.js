@@ -849,6 +849,33 @@ describe("push notifications", () => {
     assert.equal(sent[0].title, "Push Friend accepted your friend request");
   });
 
+  test("every notification is kept for the Notifications page — phone or not; read once seen; none from the blocked", async () => {
+    const sender = await register("Inbox Sender", "inboxsender");
+    const reader = await register("Inbox Reader", "inboxreader");
+    await api("PATCH", "/me/settings", { token: reader.token, body: { language: "ar" } });
+    // No push token: nothing sent to a phone, still kept.
+    await api("POST", "/friends/requests", { token: sender.token, body: { userId: reader.user.id } });
+    let inbox = (await api("GET", "/me/notifications", { token: reader.token })).body;
+    assert.equal(inbox.unread, 1);
+    assert.equal(inbox.notifications[0].kind, "friendRequest");
+    assert.match(inbox.notifications[0].title, /صديق/, "in the reader's language");
+    assert.equal(inbox.notifications[0].from.id, sender.user.id);
+    assert.equal(inbox.notifications[0].read, false);
+
+    await api("POST", `/friends/requests/${sender.user.id}/accept`, { token: reader.token });
+    const accepted = (await api("GET", "/me/notifications", { token: sender.token })).body.notifications;
+    assert.equal(accepted[0].kind, "friendAccepted");
+    assert.equal(accepted[0].title, "Inbox Reader accepted your friend request");
+
+    assert.equal((await api("POST", "/me/notifications/read", { token: reader.token })).status, 204);
+    inbox = (await api("GET", "/me/notifications", { token: reader.token })).body;
+    assert.equal(inbox.unread, 0);
+    assert.equal(inbox.notifications[0].read, true);
+
+    await api("POST", "/friends/blocked", { token: reader.token, body: { userId: sender.user.id } });
+    assert.equal((await api("GET", "/me/notifications", { token: reader.token })).body.notifications.length, 0);
+  });
+
   test("movie night: the host hears who joins; everyone hears when results are in", async () => {
     const host = await register("Push Host", "pushhost");
     const guest = await register("Push Guest", "pushguest");
