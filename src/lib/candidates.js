@@ -25,8 +25,22 @@ const PASS_HALF_LIFE_DAYS = 21;
 // Passed on in the last week: left out altogether.
 const RECENT_PASS_MS = 7 * 24 * 60 * 60 * 1000;
 
-const TIER_WEIGHT = { S: 3, A: 2, B: 1, C: 0, D: -1.5, F: -2.5 };
-const UNTIERED_WEIGHT = 0.5;
+// As the app's (utils/tasteEngine): C counts as much as untiered.
+const TIER_WEIGHT = { S: 3, A: 2, B: 1, C: 0.5, D: -1.5, F: -2.5 };
+// Untiered says nothing either way (the app's utils/tasteEngine).
+const UNTIERED_WEIGHT = 0;
+// "Feels like your taste": a film is measured against the NEAREST_COUNT
+// films you loved (S or A) it's closest to, not against the average of
+// them all — averaging, say, Paddington and Se7en lands on a bland middle
+// that's like neither (a backtest on real tiers ranked loved films worse
+// than chance that way: scripts/evaluate-taste.js).
+// Closeness to your nearest films runs higher than to an average, so its
+// centre is higher too, keeping the match words where they were. Before
+// you've loved anything, the fingerprint (onboarding's leanings) stands
+// in.
+const NEAREST_COUNT = 3;
+const NEAREST_CENTER = 0.74;
+const FINGERPRINT_CENTER = 0.65;
 const PASS_WEIGHT = -0.6;
 const LEANING_ALONE = 1.3;
 const LEANING_NUDGE = 0.7;
@@ -104,12 +118,16 @@ export const buildTasteModel = ({ watched = [], passes = [], leanings = null, no
   };
 
   const watchedIds = new Set();
+  // Each loved film's Taste DNA, for "feels like your taste".
+  const lovedVibes = [];
   watched.forEach((entry) => {
     const movie = getMovieById(entry.movieId);
     if (!movie) return;
     watchedIds.add(movie.id);
     const tier = entry.tier ?? null;
-    learn(movie, tier ? TIER_WEIGHT[tier] ?? UNTIERED_WEIGHT : UNTIERED_WEIGHT);
+    const weight = tier ? TIER_WEIGHT[tier] ?? UNTIERED_WEIGHT : UNTIERED_WEIGHT;
+    if (weight >= TIER_WEIGHT.A) lovedVibes.push(vibeOf(movie).dims);
+    if (weight !== 0) learn(movie, weight);
   });
   passes.forEach((pass) => {
     if (watchedIds.has(pass.movieId)) return;
@@ -137,6 +155,7 @@ export const buildTasteModel = ({ watched = [], passes = [], leanings = null, no
     affinity,
     fingerprint,
     fingerprintWeights,
+    lovedVibes,
     dislikedCentroid: centroid(disliked),
     // Nothing watched, and no "this or that" answered (all zeros).
     cold: watchedIds.size === 0 && !leanings?.some(Boolean),
@@ -153,8 +172,16 @@ export const scoreMovie = (movie, model, random = Math.random) => {
   const { affinity } = model;
   const vibe = vibeOf(movie);
   let score = 0;
-  if (model.fingerprint) {
-    score += WEIGHTS.vibe * (weightedCloseness(model.fingerprint, vibe.dims, model.fingerprintWeights) - 0.65) * 5;
+  if (model.lovedVibes?.length > 0) {
+    const nearest = model.lovedVibes
+      .map((dims) => weightedCloseness(dims, vibe.dims))
+      .sort((a, b) => b - a)
+      .slice(0, NEAREST_COUNT);
+    const fit = nearest.reduce((sum, value) => sum + value, 0) / nearest.length;
+    score += WEIGHTS.vibe * (fit - NEAREST_CENTER) * 5;
+  } else if (model.fingerprint) {
+    score +=
+      WEIGHTS.vibe * (weightedCloseness(model.fingerprint, vibe.dims, model.fingerprintWeights) - FINGERPRINT_CENTER) * 5;
   }
   if (model.dislikedCentroid) {
     const fit = weightedCloseness(model.dislikedCentroid, vibe.dims);

@@ -147,6 +147,28 @@ describe("admin", () => {
     db.run("DELETE FROM users WHERE id = ?", [old.user.id]);
   });
 
+  test("picks: each one taken is kept with why, and what came of it — by type on the dashboard", async () => {
+    const pick = (body) => api("POST", "/me/picks", { token: regular.token, body });
+    const outcome = (body) => api("POST", "/me/picks/outcome", { token: regular.token, body });
+    assert.equal(
+      (await pick({ movieId: "155", source: "taste", match: 88, signals: [{ key: "vibe", value: 1.234 }] })).status,
+      204,
+    );
+    await pick({ movieId: "27205", source: "watchlist", match: null });
+    await pick({ movieId: "157336", source: "something-new" });
+    assert.equal((await outcome({ movieId: "155", outcome: "loved", tier: "A" })).status, 204);
+    await outcome({ movieId: "27205", outcome: "dismissed" });
+    assert.equal((await outcome({ movieId: "155", outcome: "maybe" })).status, 400);
+    const row = db.get("SELECT * FROM picks WHERE movie_id = '155'");
+    assert.equal(row.tier, "A");
+    assert.equal(JSON.parse(row.signals)[0].value, 1.23);
+    const bySource = (await api("GET", "/admin/stats", { token: boss.token })).body.launch.picksBySource;
+    const of = (source) => bySource.find((item) => item.source === source);
+    assert.equal(of("taste").loved, 1);
+    assert.equal(of("watchlist").dismissed, 1);
+    assert.equal(of("other").taken, 1, "an unknown source counts as other");
+  });
+
   test("users: search, detail, delete (not yourself)", async () => {
     const found = await api("GET", "/admin/users?q=regular", { token: boss.token });
     assert.deepEqual(found.body.users.map((user) => user.handle), ["@regularjoe"]);

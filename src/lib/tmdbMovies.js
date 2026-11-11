@@ -95,7 +95,7 @@ const KEYWORDS = [
   /\b(chase|escape|race|fight|battle)\w*/,
 ];
 
-const features = (movie, extraGenres = []) => {
+export const vibeFeatures = (movie, extraGenres = []) => {
   const text = normalize(movie.description);
   const rated = movie.details?.rated ?? "";
   return [
@@ -114,7 +114,7 @@ const features = (movie, extraGenres = []) => {
 };
 
 // Ridge regression: solve (XᵀX + λI) w = Xᵀy.
-const fit = (rows, targets, lambda = 1) => {
+export const fitRidge = (rows, targets, lambda = 1) => {
   const p = rows[0].length;
   const a = Array.from({ length: p }, (_, i) =>
     Array.from(
@@ -138,7 +138,7 @@ const fit = (rows, targets, lambda = 1) => {
   return b.map((value, i) => (a[i][i] === 0 ? 0 : value / a[i][i]));
 };
 
-const predict = (weights, row) => row.reduce((sum, value, i) => sum + value * weights[i], 0);
+export const predictRidge = (weights, row) => row.reduce((sum, value, i) => sum + value * weights[i], 0);
 const toScore = (value) => Math.max(1, Math.min(5, Math.round(value)));
 
 // Genres / plot words → themes the catalog knows (up to 3).
@@ -186,9 +186,9 @@ export const trainVibes = (handTagged, themeVocabulary = {}) => {
     model = null;
     return;
   }
-  const rows = usable.map((movie) => features(movie));
+  const rows = usable.map((movie) => vibeFeatures(movie));
   model = {
-    weights: [0, 1, 2, 3, 4, 5].map((d) => fit(rows, usable.map((movie) => movie.vibe.dims[d]))),
+    weights: [0, 1, 2, 3, 4, 5].map((d) => fitRidge(rows, usable.map((movie) => movie.vibe.dims[d]))),
     themes: new Set(Object.keys(themeVocabulary)),
   };
 };
@@ -207,7 +207,7 @@ const themesFor = (genres, extraGenres, description) => {
 
 export const estimateVibe = (movie, extraGenres = []) => ({
   dims: model
-    ? model.weights.map((weights) => toScore(predict(weights, features(movie, extraGenres))))
+    ? model.weights.map((weights) => toScore(predictRidge(weights, vibeFeatures(movie, extraGenres))))
     : [3, 3, 3, 3, 3, 3],
   themes: themesFor(movie.genres, extraGenres, movie.description),
 });

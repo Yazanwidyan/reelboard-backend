@@ -3,7 +3,6 @@ import { all, fromJSON, get } from "../db/index.js";
 import { getCollection } from "../lib/collections.js";
 import { toBoard } from "../lib/library.js";
 import { getMovieById } from "../lib/movies.js";
-import { titleName } from "../lib/titles.js";
 import { isSuspended } from "../lib/users.js";
 
 // ReelBoard pages anyone can open in a browser — what a shared link shows
@@ -181,27 +180,52 @@ const listPage = (owner, boardRow) => {
   });
 };
 
+// Someone's Ten (the app's utils/myTen): their S films in their own order
+// (`top_ten`), any others newest first — the first ten. Their title is the
+// first: "S · Heat".
+const TEN = 10;
+const tenOf = (owner) => {
+  const order = fromJSON(owner.top_ten, []);
+  const position = new Map(order.map((id, index) => [id, index]));
+  return all("SELECT movie_id, watched_at FROM watched WHERE user_id = ? AND tier = 'S'", [owner.id])
+    .sort(
+      (a, b) =>
+        (position.get(a.movie_id) ?? Number.MAX_SAFE_INTEGER) - (position.get(b.movie_id) ?? Number.MAX_SAFE_INTEGER) ||
+        (b.watched_at ?? 0) - (a.watched_at ?? 0),
+    )
+    .map((row) => row.movie_id)
+    .filter((id) => movieOf(id))
+    .slice(0, TEN);
+};
+
 const profilePage = (owner) => {
   const watched = get("SELECT COUNT(*) AS n FROM watched WHERE user_id = ?", [owner.id]).n;
   const sTier = get("SELECT COUNT(*) AS n FROM watched WHERE user_id = ? AND tier = 'S'", [owner.id]).n;
-  const topTen = fromJSON(owner.top_ten, []);
-  const favourites = topTen.length
-    ? topTen
-    : all("SELECT movie_id FROM watched WHERE user_id = ? AND tier = 'S' ORDER BY watched_at DESC LIMIT 10", [owner.id]).map((row) => row.movie_id);
+  const favourites = tenOf(owner);
+  const crown = favourites.length ? movieOf(favourites[0]).title : null;
+  // "S · Heat — plus Arrival, Oldboy and 4 more in their Ten."
+  const others = favourites.slice(1).map((id) => movieOf(id).title);
+  const titleLine = crown
+    ? `S · ${crown}${
+        others.length
+          ? ` — plus ${others.slice(0, 2).join(", ")}${others.length > 2 ? ` and ${others.length - 2} more` : ""} in their Ten`
+          : ""
+      }`
+    : null;
   const avatar = /^https?:/.test(owner.avatar_uri ?? "")
     ? `<img class="avatar" src="${escape(owner.avatar_uri)}" alt="" />`
     : `<div class="avatar" style="background:${escape(owner.color)}">${escape(owner.display_name.slice(0, 1).toUpperCase())}</div>`;
   return page({
     title: `${owner.display_name} (@${owner.handle})`,
-    description: `${titleName(owner.level)} on ReelBoard · ${watched} films watched, ${sTier} in S tier.`,
+    description: `${titleLine ? `${titleLine}. ` : ""}${watched} films watched on ReelBoard, ${sTier} in S tier.`,
     image: movieOf(favourites[0])?.backdrop ?? null,
     open: { url: "reelboard://friends", label: `Add @${owner.handle} on ReelBoard` },
     index: false,
-    body: `<div class="hero">${avatar}<div><div class="eyebrow">${escape(titleName(owner.level))}</div>
+    body: `<div class="hero">${avatar}<div>${crown ? `<div class="eyebrow">S · ${escape(crown)}</div>` : ""}
 <h1>${escape(owner.display_name)}</h1><div class="meta">@${escape(owner.handle)}</div></div></div>
 ${owner.bio ? `<p class="about">${escape(owner.bio)}</p>` : ""}
-<div class="counts"><div><strong>${watched}</strong><span>watched</span></div><div><strong>${sTier}</strong><span>in S tier</span></div><div><strong>${owner.ranks ?? 0}</strong><span>ranks</span></div></div>
-${favourites.length ? `<div class="eyebrow">Their S tier</div>${posterGrid(favourites)}` : ""}`,
+<div class="counts"><div><strong>${watched}</strong><span>watched</span></div><div><strong>${sTier}</strong><span>in S tier</span></div><div><strong>${favourites.length}/${TEN}</strong><span>their Ten</span></div></div>
+${favourites.length ? `<div class="eyebrow">Their Ten</div>${posterGrid(favourites)}` : ""}`,
   });
 };
 

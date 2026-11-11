@@ -254,6 +254,27 @@ CREATE TABLE IF NOT EXISTS push_tokens (
 );
 CREATE INDEX IF NOT EXISTS push_tokens_by_user ON push_tokens (user_id);
 
+-- Every pick for tonight someone took, and what came of it (routes/
+-- picks.js): why it was suggested (`source`), the engine's 0–100 `match`,
+-- what moved it (`signals`, JSON [{ key, value }]), whether the film's
+-- Taste DNA was hand-tagged, and its outcome — loved / fine / not (by its
+-- tier), not_watched or dismissed; none yet → ignored after a few days.
+CREATE TABLE IF NOT EXISTS picks (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  movie_id   TEXT NOT NULL,
+  source     TEXT NOT NULL,
+  match      INTEGER,
+  hand_dna   INTEGER NOT NULL DEFAULT 0,
+  signals    TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  outcome    TEXT,
+  tier       TEXT,
+  outcome_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS picks_by_user ON picks (user_id, movie_id);
+CREATE INDEX IF NOT EXISTS picks_by_time ON picks (created_at);
+
 -- What the server told someone (lib/push.js), kept for the app's
 -- Notifications page whether or not a phone showed it: `kind` one of
 -- push.js's TEXT, `args` its words (JSON), `url` what a tap opens, who

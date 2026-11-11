@@ -149,6 +149,32 @@ router.get("/stats", (req, res) => {
     activated: reached("pick_tiered"),
   };
 
+  // The taste system's own numbers (last 30 days, every answer counted —
+  // one per person a day): how the morning question gets answered, and
+  // how the picks land once tiered.
+  const answers = (name) =>
+    count("SELECT COUNT(*) AS n FROM events WHERE name = ? AND created_at > ?", [name, since(30)]);
+  const morning = { quick: answers("nudge_quick"), slider: answers("nudge_slider"), dismissed: answers("nudge_dismissed") };
+  const pickTiers = { high: answers("pick_tier_high"), mid: answers("pick_tier_mid"), low: answers("pick_tier_low") };
+
+  // Picks by why they were suggested (routes/picks.js), last 30 days: how
+  // each kind landed — so a watchlist pick (loved anyway) doesn't flatter
+  // the taste engine, and ignored picks count too (none after 3 days).
+  const IGNORED_AFTER = 3 * DAY;
+  const picksBySource = all(
+    `SELECT source,
+       COUNT(*) AS taken,
+       SUM(outcome = 'loved') AS loved,
+       SUM(outcome = 'fine') AS fine,
+       SUM(outcome = 'not') AS "not",
+       SUM(outcome = 'not_watched') AS notWatched,
+       SUM(outcome = 'dismissed') AS dismissed,
+       SUM(outcome IS NULL AND created_at < ?) AS ignored,
+       SUM(hand_dna) AS handDna
+     FROM picks WHERE created_at > ? GROUP BY source ORDER BY taken DESC`,
+    [Date.now() - IGNORED_AFTER, since(30)],
+  ).map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, key === "source" ? value : value ?? 0])));
+
   res.json({
     launch: {
       onboardingCompleted: rate(onboarded, recent),
@@ -157,6 +183,11 @@ router.get("/stats", (req, res) => {
       // How often a pick for tonight is actually watched — whether the
       // taste is any good.
       pickAcceptance: rate(funnel.pickWatched, funnel.pickAccepted),
+      // Of the picks that got tiered, how many were loved (S or A).
+      picksLoved: rate(pickTiers.high, pickTiers.high + pickTiers.mid + pickTiers.low),
+      morning,
+      pickTiers,
+      picksBySource,
       funnel,
     },
     users: {

@@ -29,6 +29,15 @@ export const EVENTS = [
   "nudge_watched",
   "nudge_not_watched",
   "pick_tiered",
+  // How the pick landed when it was tiered: S/A, B/C or D/F — the grade
+  // of the taste picks.
+  "pick_tier_high",
+  "pick_tier_mid",
+  "pick_tier_low",
+  // How the morning question was answered: one tap, the full slider, or ✕.
+  "nudge_quick",
+  "nudge_slider",
+  "nudge_dismissed",
   // Home's invite card (no friends yet, enough tiers to compare): sent.
   "invite_sent",
 ];
